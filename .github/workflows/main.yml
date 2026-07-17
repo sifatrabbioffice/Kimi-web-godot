@@ -1,18 +1,13 @@
 name: 🎮 Build Unsigned Godot Web Editor IPA
 
 on:
-  # ✅ Auto-run on every push to main/master
   push:
     branches: [main, master]
     paths:
       - '.github/workflows/build-godot-web-editor-ipa.yml'
       - 'godot_editor/**'
-
-  # ✅ Auto-run on pull requests
   pull_request:
     branches: [main, master]
-
-  # ✅ Manual trigger (keep this)
   workflow_dispatch:
     inputs:
       godot_version:
@@ -24,110 +19,137 @@ on:
         required: true
         default: 'stable'
 
+env:
+  GODOT_VERSION: ${{ github.event.inputs.godot_version || '4.6' }}
+  GODOT_STATUS: ${{ github.event.inputs.godot_status || 'stable' }}
+
 jobs:
   build-ipa:
     runs-on: macos-latest
 
     steps:
-      # ─────────────────────────────────────────
-      # 1. Checkout & Xcode Setup
-      # ─────────────────────────────────────────
+      # ═══════════════════════════════════════════════════════
+      # STEP 1: Checkout repo
+      # ═══════════════════════════════════════════════════════
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🔧 Setup Xcode (Latest Stable)
+      # ═══════════════════════════════════════════════════════
+      # STEP 2: Setup Xcode
+      # ═══════════════════════════════════════════════════════
+      - name: 🔧 Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
 
-      - name: 🍺 Install xcodegen & Pillow
-        run: |
-          brew install xcodegen
-          pip3 install Pillow --break-system-packages
+      # ═══════════════════════════════════════════════════════
+      # STEP 3: Install tools
+      # ═══════════════════════════════════════════════════════
+      - name: 🍺 Install xcodegen
+        run: brew install xcodegen
 
-      # ─────────────────────────────────────────
-      # 2. Download Godot Web Editor Files
-      # ─────────────────────────────────────────
-      - name: ⬇️ Download Godot Web Editor (Offline Bundle)
+      - name: 🐍 Install Pillow
+        run: pip3 install Pillow --break-system-packages || pip3 install Pillow --user || true
+
+      # ═══════════════════════════════════════════════════════
+      # STEP 4: Download Godot Web Editor
+      # ═══════════════════════════════════════════════════════
+      - name: ⬇️ Download Godot Web Editor
         run: |
-          # Use inputs if manual dispatch, otherwise defaults for auto-run
-          VERSION="${{ github.event.inputs.godot_version || '4.6' }}"
-          STATUS="${{ github.event.inputs.godot_status || 'stable' }}"
+          set -e
+          VERSION="$GODOT_VERSION"
+          STATUS="$GODOT_STATUS"
 
           mkdir -p godot_editor && cd godot_editor
+          echo "🔍 Downloading Godot ${VERSION}-${STATUS} Web Editor..."
 
-          echo "🔍 Trying to download Godot ${VERSION}-${STATUS} Web Editor..."
+          # Try multiple sources
+          SUCCESS=0
 
-          # Primary CDN URL
+          # Source 1: editor.godotengine.org CDN
           BASE_URL="https://editor.godotengine.org/releases/${VERSION}-${STATUS}"
+          echo "Trying CDN: $BASE_URL"
 
-          # Try to download main HTML entry point (common names)
-          curl -sL -o index.html "${BASE_URL}/godot.editor.html" || \
-          curl -sL -o index.html "${BASE_URL}/index.html" || \
-          curl -sL -o index.html "${BASE_URL}/godot.html" || true
+          curl -fsL -o index.html "${BASE_URL}/godot.editor.html" && SUCCESS=1 || true
+          if [ $SUCCESS -eq 0 ]; then
+            curl -fsL -o index.html "${BASE_URL}/index.html" && SUCCESS=1 || true
+          fi
 
-          if [ ! -s index.html ]; then
-            echo "⚠️ Could not find web editor at ${BASE_URL}"
-            echo "🔄 Trying GitHub releases fallback..."
-
-            # Fallback: GitHub releases (godot-builds repo)
-            GH_URL="https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
-            curl -sL -o web_editor.zip "$GH_URL" || true
-
-            if [ -s web_editor.zip ]; then
-              unzip -q web_editor.zip && rm web_editor.zip
-              # Rename any .html to index.html
+          # Source 2: GitHub releases
+          if [ $SUCCESS -eq 0 ]; then
+            echo "Trying GitHub releases..."
+            GH_ZIP="https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
+            curl -fsL -o web_editor.zip "$GH_ZIP" && {
+              unzip -q web_editor.zip
+              rm -f web_editor.zip
               for f in *.html; do
                 [ -f "$f" ] && mv "$f" index.html && break
               done
-            fi
+              SUCCESS=1
+            } || true
           fi
 
-          if [ ! -s index.html ]; then
-            echo "❌ ERROR: Could not download Godot Web Editor files."
-            echo "💡 Tip: Manually upload web editor files to repo root/godot_editor/ and re-run."
+          # Source 3: Tuxfamily mirror
+          if [ $SUCCESS -eq 0 ]; then
+            echo "Trying Tuxfamily mirror..."
+            TUX_URL="https://downloads.tuxfamily.org/godotengine/${VERSION}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
+            curl -fsL -o web_editor.zip "$TUX_URL" && {
+              unzip -q web_editor.zip
+              rm -f web_editor.zip
+              for f in *.html; do
+                [ -f "$f" ] && mv "$f" index.html && break
+              done
+              SUCCESS=1
+            } || true
+          fi
+
+          if [ $SUCCESS -eq 0 ] || [ ! -f index.html ]; then
+            echo "❌ Failed to download Godot Web Editor"
+            echo "Please manually place files in godot_editor/ folder and re-run"
             exit 1
           fi
 
-          # Smart parse: extract all .js .wasm .data .zip .worker.js .worklet.js references from HTML
-          echo "🧠 Parsing HTML for resource dependencies..."
-          grep -oE '"[^"]+\.(js|wasm|data|zip|worker\.js|worklet\.js)"' index.html 2>/dev/null | tr -d '"' | sort -u | while read -r file; do
-            # Skip if already downloaded or is external URL
+          echo "✅ index.html downloaded"
+
+          # Download referenced assets
+          echo "📦 Downloading assets..."
+          grep -oE '[^"'"'"'\s>]+\.(js|wasm|data|zip|worker\.js|worklet\.js)' index.html 2>/dev/null | sort -u | while read -r file; do
             case "$file" in
-              http*) continue ;;
+              http*|//*) continue ;;
             esac
             if [ ! -f "$file" ]; then
-              echo "  ⬇️ Downloading: $file"
-              curl -sL -o "$file" "${BASE_URL}/${file}" || true
+              echo "  ⬇️ $file"
+              curl -fsL -o "$file" "${BASE_URL}/${file}" || true
             fi
           done
 
-          # Also try common known files (in case regex missed any)
-          for file in godot.editor.js godot.editor.wasm godot.editor.worker.js godot.editor.audio.worklet.js godot.editor.data godot.editor.zip; do
+          # Common fallback files
+          for file in godot.editor.js godot.editor.wasm godot.editor.worker.js godot.editor.audio.worklet.js godot.editor.data; do
             if [ ! -f "$file" ]; then
-              curl -sL -o "$file" "${BASE_URL}/${file}" || true
+              curl -fsL -o "$file" "${BASE_URL}/${file}" || true
             fi
           done
 
-          echo "📦 Downloaded files:"
+          echo "📂 Files in godot_editor:"
           ls -lah
           cd ..
 
-      # ─────────────────────────────────────────
-      # 3. Create iOS Project Structure
-      # ─────────────────────────────────────────
-      - name: 🏗️ Create iOS Wrapper App
+      # ═══════════════════════════════════════════════════════
+      # STEP 5: Create iOS App Structure
+      # ═══════════════════════════════════════════════════════
+      - name: 🏗️ Create iOS App
         run: |
+          set -e
           mkdir -p GodotWebEditor/Sources
           mkdir -p GodotWebEditor/Resources/godot_editor
           mkdir -p GodotWebEditor/Resources/Base.lproj
           mkdir -p GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset
 
-          # ── Copy Godot files into app bundle ──
-          cp -R godot_editor/* GodotWebEditor/Resources/godot_editor/ 2>/dev/null || true
+          # Copy Godot files
+          cp -R godot_editor/* GodotWebEditor/Resources/godot_editor/
 
-          # ── SwiftUI App Entry (@main) ──
-          cat > GodotWebEditor/Sources/GodotWebEditorApp.swift << 'SWIFTEOF'
+          # ── SwiftUI App ──
+          cat > GodotWebEditor/Sources/GodotWebEditorApp.swift << 'EOF'
           import SwiftUI
           import WebKit
 
@@ -144,93 +166,42 @@ jobs:
           struct GodotEditorView: UIViewRepresentable {
               func makeUIView(context: Context) -> WKWebView {
                   let config = WKWebViewConfiguration()
-
-                  // ═══════════════════════════════════════════════
-                  // MAX WEBGL / GPU PERFORMANCE CONFIG
-                  // ═══════════════════════════════════════════════
-
-                  // Enable JS & WebGL 2.0
                   config.preferences.javaScriptEnabled = true
                   config.defaultWebpagePreferences.allowsContentJavaScript = true
 
-                  // Allow large memory for WebAssembly / Godot
-                  if #available(iOS 15.0, *) {
-                      let prefs = WKWebpagePreferences()
-                      prefs.allowsContentJavaScript = true
-                      config.defaultWebpagePreferences = prefs
-                  }
-
-                  // ═══════════════════════════════════════════════
-                  // ⚠️ FORWARD+ IS NOT POSSIBLE IN WEBVIEW
-                  // Godot Web Editor = Compatibility Renderer (WebGL 2.0)
-                  // Apple ANGLE translates WebGL → Metal automatically
-                  // iPhone 15 Pro Max GPU IS fully utilized via Metal
-                  // ═══════════════════════════════════════════════
-
                   let webView = WKWebView(frame: .zero, configuration: config)
                   webView.scrollView.bounces = false
-                  webView.backgroundColor = UIColor.black
+                  webView.backgroundColor = .black
                   webView.isOpaque = true
 
-                  // Load bundled Godot Web Editor (fully offline)
                   if let url = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "godot_editor") {
-                      let baseURL = url.deletingLastPathComponent()
-                      webView.loadFileURL(url, allowingReadAccessTo: baseURL)
-                  } else {
-                      let html = """
-                      <html>
-                      <head><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
-                      <body style="background:#0d1117;color:#c9d1d9;font-family:-apple-system,sans-serif;
-                                   display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
-                          <div style="text-align:center;">
-                              <h2>⚠️ Godot Editor Files Missing</h2>
-                              <p>index.html not found in app bundle.</p>
-                          </div>
-                      </body>
-                      </html>
-                      """
-                      webView.loadHTMLString(html, baseURL: nil)
+                      webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
                   }
-
                   return webView
               }
 
               func updateUIView(_ uiView: WKWebView, context: Context) {}
           }
-          SWIFTEOF
+          EOF
 
-          # ── Info.plist ──
-          cat > GodotWebEditor/Info.plist << 'PLISTEOF'
+          # ── Info.plist (NO shell vars in single-quoted heredoc) ──
+          cat > GodotWebEditor/Info.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-              <key>CFBundleDevelopmentRegion</key>
-              <string>en</string>
-              <key>CFBundleDisplayName</key>
-              <string>Godot Editor</string>
-              <key>CFBundleExecutable</key>
-              <string>GodotWebEditor</string>
-              <key>CFBundleIdentifier</key>
-              <string>com.godot.webeditor.local</string>
-              <key>CFBundleInfoDictionaryVersion</key>
-              <string>6.0</string>
-              <key>CFBundleName</key>
-              <string>GodotWebEditor</string>
-              <key>CFBundlePackageType</key>
-              <string>APPL</string>
-              <key>CFBundleShortVersionString</key>
-              <string>1.0.0</string>
-              <key>CFBundleVersion</key>
-              <string>1</string>
-              <key>LSRequiresIPhoneOS</key>
-              <true/>
-              <key>UILaunchStoryboardName</key>
-              <string>LaunchScreen</string>
-              <key>UIRequiredDeviceCapabilities</key>
-              <array>
-                  <string>arm64</string>
-              </array>
+              <key>CFBundleDevelopmentRegion</key><string>en</string>
+              <key>CFBundleDisplayName</key><string>Godot Editor</string>
+              <key>CFBundleExecutable</key><string>GodotWebEditor</string>
+              <key>CFBundleIdentifier</key><string>com.godot.webeditor.local</string>
+              <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+              <key>CFBundleName</key><string>GodotWebEditor</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleShortVersionString</key><string>1.0.0</string>
+              <key>CFBundleVersion</key><string>1</string>
+              <key>LSRequiresIPhoneOS</key><true/>
+              <key>UILaunchStoryboardName</key><string>LaunchScreen</string>
+              <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
               <key>UISupportedInterfaceOrientations</key>
               <array>
                   <string>UIInterfaceOrientationPortrait</string>
@@ -244,16 +215,14 @@ jobs:
                   <string>UIInterfaceOrientationLandscapeLeft</string>
                   <string>UIInterfaceOrientationLandscapeRight</string>
               </array>
-              <key>UIViewControllerBasedStatusBarAppearance</key>
-              <true/>
-              <key>UIStatusBarHidden</key>
-              <true/>
+              <key>UIViewControllerBasedStatusBarAppearance</key><true/>
+              <key>UIStatusBarHidden</key><true/>
           </dict>
           </plist>
-          PLISTEOF
+          EOF
 
           # ── LaunchScreen.storyboard ──
-          cat > GodotWebEditor/Resources/Base.lproj/LaunchScreen.storyboard << 'LAUNCHEOF'
+          cat > GodotWebEditor/Resources/Base.lproj/LaunchScreen.storyboard << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="21701" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="01J-lp-oVM">
               <device id="retina6_12" orientation="portrait" appearance="dark"/>
@@ -275,7 +244,7 @@ jobs:
                                           <color key="textColor" red="0.93725490570000003" green="0.93725490570000003" blue="0.95686274770000002" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                                           <nil key="highlightedColor"/>
                                       </label>
-                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • WKWebView • Metal GPU (ANGLE)" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
+                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • WKWebView • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
                                           <rect key="frame" x="0.0" y="314.66666666666669" width="393" height="21"/>
                                           <fontDescription key="fontDescription" type="system" pointSize="15"/>
                                           <color key="textColor" red="0.5803921569" green="0.5960784314" blue="0.6392156863" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
@@ -297,67 +266,37 @@ jobs:
                   </scene>
               </scenes>
           </document>
-          LAUNCHEOF
+          EOF
 
-          # ── Assets.xcassets ──
-          cat > GodotWebEditor/Resources/Assets.xcassets/Contents.json << 'JSONEOF'
-          {"info":{"author":"xcode","version":1}}
-          JSONEOF
+          # ── Assets ──
+          echo '{"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/Contents.json
+          echo '{"images":[{"filename":"appicon.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json
 
-          cat > GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json << 'JSONEOF'
-          {
-            "images" : [
-              {
-                "filename" : "appicon.png",
-                "idiom" : "universal",
-                "platform" : "ios",
-                "size" : "1024x1024"
-              }
-            ],
-            "info" : {
-              "author" : "xcode",
-              "version" : 1
-            }
-          }
-          JSONEOF
-
-          # ── Create app icon using Pillow ──
+          # ── App Icon ──
           python3 << 'PYEOF'
           try:
               from PIL import Image
-              # Godot blue: #478CB0
               img = Image.new('RGB', (1024, 1024), color=(0x47, 0x8C, 0xB0))
               img.save('GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset/appicon.png')
-              print("✅ App icon created with Pillow")
+              print("✅ Icon created with Pillow")
           except Exception as e:
               print(f"Pillow failed: {e}")
-              # Fallback: pure Python PNG generator
               import struct, zlib
               w, h = 1024, 1024
-              # Godot blue #478CB0
-              r, g, b = 0x47, 0x8C, 0xB0
-              raw = bytes([r, g, b] * (w * h))
-              # PNG encoding
-              def png_chunk(chunk_type, data):
-                  chunk = struct.pack(">I", len(data)) + chunk_type + data
-                  crc = zlib.crc32(chunk_type + data) & 0xffffffff
-                  return chunk + struct.pack(">I", crc)
-
+              raw = bytes([0x47, 0x8C, 0xB0] * (w * h))
+              def png_chunk(t, d):
+                  c = struct.pack(">I", len(d)) + t + d
+                  return c + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
               ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
-              idat = zlib.compress(b''.join([b' ' + raw[i*w*3:(i+1)*w*3] for i in range(h)]))
-
-              png = b'\x89PNG\r\n\x1a\n'
-              png += png_chunk(b'IHDR', ihdr)
-              png += png_chunk(b'IDAT', idat)
-              png += png_chunk(b'IEND', b'')
-
+              idat = zlib.compress(b''.join([b'\x00' + raw[i*w*3:(i+1)*w*3] for i in range(h)]))
+              png = b'\x89PNG\r\n\x1a\n' + png_chunk(b'IHDR', ihdr) + png_chunk(b'IDAT', idat) + png_chunk(b'IEND', b'')
               with open('GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset/appicon.png', 'wb') as f:
                   f.write(png)
-              print("✅ App icon created with pure Python fallback")
+              print("✅ Icon created with fallback")
           PYEOF
 
-          # ── xcodegen Project Spec ──
-          cat > GodotWebEditor/project.yml << 'YAMLEOF'
+          # ── xcodegen project.yml ──
+          cat > GodotWebEditor/project.yml << 'EOF'
           name: GodotWebEditor
           settings:
             MARKETING_VERSION: "1.0.0"
@@ -370,10 +309,7 @@ jobs:
             CODE_SIGNING_REQUIRED: NO
             CODE_SIGNING_ALLOWED: NO
             DEVELOPMENT_TEAM: ""
-            PROVISIONING_PROFILE_SPECIFIER: ""
             ENABLE_BITCODE: NO
-            STRIP_INSTALLED_PRODUCT: NO
-            SWIFT_OPTIMIZATION_LEVEL: "-O"
           targets:
             GodotWebEditor:
               type: application
@@ -385,85 +321,69 @@ jobs:
                 - path: Resources
               info:
                 path: Info.plist
-          YAMLEOF
+          EOF
 
-          # Generate Xcode project
           cd GodotWebEditor
           xcodegen generate
           cd ..
 
-      # ─────────────────────────────────────────
-      # 4. Build Unsigned IPA
-      # ─────────────────────────────────────────
-      - name: 🔨 Build Unsigned IPA (arm64)
+      # ═══════════════════════════════════════════════════════
+      # STEP 6: Build Unsigned .app
+      # ═══════════════════════════════════════════════════════
+      - name: 🔨 Build Unsigned .app
         run: |
+          set -e
           cd GodotWebEditor
 
-          xcodebuild -project GodotWebEditor.xcodeproj \
-            -scheme GodotWebEditor \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath ../DerivedData \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            ONLY_ACTIVE_ARCH=NO \
-            ARCHS="arm64" \
-            VALID_ARCHS="arm64" \
-            ENABLE_BITCODE=NO \
-            clean build
+          xcodebuild -project GodotWebEditor.xcodeproj             -scheme GodotWebEditor             -configuration Release             -destination 'generic/platform=iOS'             -derivedDataPath ../DerivedData             CODE_SIGN_IDENTITY=""             CODE_SIGNING_REQUIRED=NO             CODE_SIGNING_ALLOWED=NO             DEVELOPMENT_TEAM=""             PROVISIONING_PROFILE_SPECIFIER=""             ONLY_ACTIVE_ARCH=NO             ARCHS="arm64"             ENABLE_BITCODE=NO             clean build
 
           cd ..
 
-          # Locate .app bundle
+      # ═══════════════════════════════════════════════════════
+      # STEP 7: Package as IPA
+      # ═══════════════════════════════════════════════════════
+      - name: 📦 Package IPA
+        run: |
+          set -e
+
           APP_PATH=$(find DerivedData -name "GodotWebEditor.app" -type d | head -n 1)
 
           if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
-            echo "❌ ERROR: .app bundle not found in DerivedData"
+            echo "❌ .app bundle not found"
             find DerivedData -type d -name "*.app" || true
             exit 1
           fi
 
-          echo "✅ Found app bundle: $APP_PATH"
+          echo "✅ Found: $APP_PATH"
 
-          # Package as IPA (Payload/GodotWebEditor.app)
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
-
-          # Remove any signature artifacts if present (ensure truly unsigned)
           rm -rf Payload/GodotWebEditor.app/_CodeSignature 2>/dev/null || true
 
-          # Create IPA
-          IPA_NAME="GodotWebEditor_v${{ github.event.inputs.godot_version || '4.6' }}_unsigned.ipa"
+          IPA_NAME="GodotWebEditor_v${GODOT_VERSION}_unsigned.ipa"
           zip -qr "$IPA_NAME" Payload
           rm -rf Payload
 
-          echo "📦 Created: $IPA_NAME"
+          echo "IPA_NAME=$IPA_NAME" >> $GITHUB_ENV
+          echo "✅ Created: $IPA_NAME"
           ls -lh "$IPA_NAME"
 
-          # Save filename for upload step
-          echo "IPA_NAME=$IPA_NAME" >> $GITHUB_ENV
-
-      # ─────────────────────────────────────────
-      # 5. Upload Artifact
-      # ─────────────────────────────────────────
-      - name: 📤 Upload Unsigned IPA
+      # ═══════════════════════════════════════════════════════
+      # STEP 8: Upload Artifact
+      # ═══════════════════════════════════════════════════════
+      - name: 📤 Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.IPA_NAME }}
-          path: ${{ env.IPA_NAME }}
+          name: godot-web-editor-ipa
+          path: GodotWebEditor_v${{ env.GODOT_VERSION }}_unsigned.ipa
           retention-days: 30
 
-      - name: ✅ Summary
+      - name: ✅ Done
         run: |
           echo ""
-          echo "╔════════════════════════════════════════════════════════════╗"
-          echo "║  🎉 UNSIGNED IPA BUILD COMPLETE                            ║"
-          echo "╠════════════════════════════════════════════════════════════╣"
-          echo "║  📁 File: ${{ env.IPA_NAME }}                              ║"
-          echo "║  📱 Install via: AltStore / Sideloadly / Scarlet           ║"
-          echo "║  ⚠️  This IPA is UNSIGNED — sideloader will re-sign it     ║"
-          echo "║  🎮 Renderer: WebGL 2.0 (Compatibility) → Metal via ANGLE  ║"
-          echo "╚════════════════════════════════════════════════════════════╝"
+          echo "╔══════════════════════════════════════════════════════╗"
+          echo "║  🎉 UNSIGNED IPA BUILD COMPLETE                      ║"
+          echo "╠══════════════════════════════════════════════════════╣"
+          echo "║  📁 File: ${{ env.IPA_NAME }}                        ║"
+          echo "║  📱 Install: AltStore / Sideloadly / Scarlet         ║"
+          echo "╚══════════════════════════════════════════════════════╝"
