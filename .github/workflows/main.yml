@@ -31,7 +31,7 @@ jobs:
       - name: 🍺 Install xcodegen & Pillow
         run: |
           brew install xcodegen
-          pip3 install Pillow
+          pip3 install Pillow --break-system-packages
 
       # ─────────────────────────────────────────
       # 2. Download Godot Web Editor Files
@@ -308,13 +308,39 @@ jobs:
           }
           JSONEOF
 
-          # ── Create app icon using Pillow (now installed) ──
+          # ── Create app icon using Pillow ──
           python3 << 'PYEOF'
-          from PIL import Image
-          # Godot blue: #478CB0
-          img = Image.new('RGB', (1024, 1024), color=(0x47, 0x8C, 0xB0))
-          img.save('GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset/appicon.png')
-          print("✅ App icon created successfully")
+          try:
+              from PIL import Image
+              # Godot blue: #478CB0
+              img = Image.new('RGB', (1024, 1024), color=(0x47, 0x8C, 0xB0))
+              img.save('GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset/appicon.png')
+              print("✅ App icon created with Pillow")
+          except Exception as e:
+              print(f"Pillow failed: {e}")
+              # Fallback: pure Python PNG generator
+              import struct, zlib
+              w, h = 1024, 1024
+              # Godot blue #478CB0
+              r, g, b = 0x47, 0x8C, 0xB0
+              raw = bytes([r, g, b] * (w * h))
+              # PNG encoding
+              def png_chunk(chunk_type, data):
+                  chunk = struct.pack(">I", len(data)) + chunk_type + data
+                  crc = zlib.crc32(chunk_type + data) & 0xffffffff
+                  return chunk + struct.pack(">I", crc)
+
+              ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+              idat = zlib.compress(b''.join([b' ' + raw[i*w*3:(i+1)*w*3] for i in range(h)]))
+
+              png = b'\x89PNG\r\n\x1a\n'
+              png += png_chunk(b'IHDR', ihdr)
+              png += png_chunk(b'IDAT', idat)
+              png += png_chunk(b'IEND', b'')
+
+              with open('GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset/appicon.png', 'wb') as f:
+                  f.write(png)
+              print("✅ App icon created with pure Python fallback")
           PYEOF
 
           # ── xcodegen Project Spec ──
