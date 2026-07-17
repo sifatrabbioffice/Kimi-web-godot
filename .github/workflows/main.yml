@@ -9,7 +9,7 @@ on:
 
 env:
   GODOT_BRANCH: "4.6-stable"
-  EMSDK_VERSION: "4.0"
+  EMSDK_VERSION: "6.0.3"
 
 jobs:
   # ═══════════════════════════════════════════════════════════════
