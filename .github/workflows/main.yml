@@ -20,28 +20,19 @@ jobs:
   build-ipa:
     runs-on: macos-latest
     steps:
-      # ═══════════════════════════════════════════════════════
-      # STEP 1: Checkout
-      # ═══════════════════════════════════════════════════════
       - name: 1️⃣ Checkout Repo
         uses: actions/checkout@v4
 
-      # ═══════════════════════════════════════════════════════
-      # STEP 2: Setup Xcode
-      # ═══════════════════════════════════════════════════════
       - name: 2️⃣ Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
 
-      # ═══════════════════════════════════════════════════════
-      # STEP 3: Install xcodegen
-      # ═══════════════════════════════════════════════════════
       - name: 3️⃣ Install xcodegen
         run: brew install xcodegen
 
       # ═══════════════════════════════════════════════════════
-      # STEP 4: Download Pre-built Godot Web Editor
+      # STEP 4: Download Godot Web Editor
       # ═══════════════════════════════════════════════════════
       - name: 4️⃣ Download Godot Web Editor
         run: |
@@ -56,15 +47,12 @@ jobs:
           mkdir -p godot_editor
           cd godot_editor
 
-          # Try GitHub releases first
           URL1="https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
           echo "Trying: $URL1"
 
           if curl -fsL -o web_editor.zip "$URL1"; then
             echo "✅ Downloaded from GitHub releases"
-            ls -la web_editor.zip
           else
-            echo "❌ GitHub releases failed, trying Tuxfamily..."
             URL2="https://downloads.tuxfamily.org/godotengine/${VERSION}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
             echo "Trying: $URL2"
             curl -fsL -o web_editor.zip "$URL2" || {
@@ -74,38 +62,19 @@ jobs:
             echo "✅ Downloaded from Tuxfamily"
           fi
 
-          echo ""
-          echo "📦 ZIP file info:"
-          ls -la web_editor.zip
-          file web_editor.zip
-
-          echo ""
-          echo "📂 ZIP contents:"
-          unzip -l web_editor.zip | head -30
-
-          echo ""
-          echo "📂 Extracting..."
+          echo "📦 ZIP size: $(ls -lh web_editor.zip | awk '{print $5}')"
           unzip -q web_editor.zip
           rm -f web_editor.zip
 
-          echo ""
-          echo "📂 After extract - listing all files:"
-          ls -la
-
-          # Check if files are in a subdirectory (flatten if needed)
+          # Flatten subdirectory if present
           SUBDIR=$(find . -maxdepth 1 -type d | grep -v '^\.$' | head -n 1)
           if [ -n "$SUBDIR" ] && [ -d "$SUBDIR" ]; then
-            echo ""
-            echo "📁 Found subdirectory: $SUBDIR"
-            echo "📁 Moving files up..."
             mv "$SUBDIR"/* . 2>/dev/null || true
             rmdir "$SUBDIR" 2>/dev/null || true
-            echo "📂 After flatten:"
-            ls -la
           fi
 
-          # Rename main HTML to index.html
-          for f in godot.editor.html godot.web.editor.html godot.html index.html; do
+          # Rename main HTML
+          for f in godot.editor.html godot.web.editor.html godot.html; do
             if [ -f "$f" ] && [ "$f" != "index.html" ]; then
               mv "$f" index.html
               echo "📝 Renamed $f → index.html"
@@ -114,89 +83,196 @@ jobs:
           done
 
           if [ ! -f index.html ]; then
-            echo "❌ No index.html found! Files present:"
+            echo "❌ No index.html found!"
             ls -la
             exit 1
           fi
 
-          echo ""
-          echo "✅ Godot Web Editor ready. Total size:"
-          du -sh .
-          echo "File count: $(find . -type f | wc -l)"
-
+          echo "✅ Ready. Size: $(du -sh . | cut -f1), Files: $(find . -type f | wc -l)"
           cd ..
 
       # ═══════════════════════════════════════════════════════
-      # STEP 5: Create iOS App
+      # STEP 5: Create iOS App with URL Scheme Handler
       # ═══════════════════════════════════════════════════════
       - name: 5️⃣ Create iOS App
         run: |
           set -ex
 
-          # Verify godot_editor has files
-          echo "📂 Verifying godot_editor/ contents:"
-          ls -la godot_editor/
-
-          if [ ! -f godot_editor/index.html ]; then
-            echo "❌ godot_editor/index.html missing!"
-            exit 1
-          fi
-
-          # Create directories
           mkdir -p GodotWebEditor/Sources
           mkdir -p GodotWebEditor/Resources/godot_editor
           mkdir -p GodotWebEditor/Resources/Base.lproj
           mkdir -p GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset
 
-          # Copy ALL Godot files into app bundle (fully offline)
-          echo "📂 Copying Godot files to Resources..."
           cp -R godot_editor/* GodotWebEditor/Resources/godot_editor/
+          echo "✅ Copied $(find GodotWebEditor/Resources/godot_editor -type f | wc -l) files"
 
-          echo "📂 Verifying Resources/godot_editor/ contents:"
-          ls -la GodotWebEditor/Resources/godot_editor/
-          echo "Resources size: $(du -sh GodotWebEditor/Resources/)"
-
-          # ── SwiftUI App ──
+          # ── SwiftUI App with URL Scheme Handler ──
           cat > GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
           import SwiftUI
           import WebKit
+
+          // ═══════════════════════════════════════════════════════
+          // Custom URL Scheme Handler - serves local files with
+          // proper MIME types and CORS headers for WebAssembly
+          // ═══════════════════════════════════════════════════════
+          class GodotSchemeHandler: NSObject, WKURLSchemeHandler {
+              func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+                  guard let url = urlSchemeTask.request.url else {
+                      urlSchemeTask.didFailWithError(NSError(domain: "InvalidURL", code: 400))
+                      return
+                  }
+
+                  let path = url.path
+                  let fileName = (path as NSString).lastPathComponent
+                  let fileExt = (path as NSString).pathExtension
+
+                  // Map path to bundle resource
+                  var resourceURL: URL?
+                  if path == "/" || path == "/index.html" {
+                      resourceURL = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "godot_editor")
+                  } else {
+                      resourceURL = Bundle.main.url(forResource: fileName, withExtension: "", subdirectory: "godot_editor")
+                      // Try without extension if not found
+                      if resourceURL == nil && !fileExt.isEmpty {
+                          let nameWithoutExt = (fileName as NSString).deletingPathExtension
+                          resourceURL = Bundle.main.url(forResource: nameWithoutExt, withExtension: fileExt, subdirectory: "godot_editor")
+                      }
+                  }
+
+                  guard let fileURL = resourceURL,
+                        let data = try? Data(contentsOf: fileURL) else {
+                      print("❌ GodotScheme: File not found: \(path)")
+                      urlSchemeTask.didFailWithError(NSError(domain: "NotFound", code: 404))
+                      return
+                  }
+
+                  let mimeType = Self.mimeType(for: fileExt)
+
+                  // Required headers for WebAssembly + SharedArrayBuffer
+                  let headers = [
+                      "Content-Type": mimeType,
+                      "Content-Length": String(data.count),
+                      "Cross-Origin-Opener-Policy": "same-origin",
+                      "Cross-Origin-Embedder-Policy": "require-corp",
+                      "Access-Control-Allow-Origin": "*"
+                  ]
+
+                  guard let response = HTTPURLResponse(
+                      url: url,
+                      statusCode: 200,
+                      httpVersion: "HTTP/1.1",
+                      headerFields: headers
+                  ) else {
+                      urlSchemeTask.didFailWithError(NSError(domain: "ResponseError", code: 500))
+                      return
+                  }
+
+                  urlSchemeTask.didReceive(response)
+                  urlSchemeTask.didReceive(data)
+                  urlSchemeTask.didFinish()
+              }
+
+              func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
+
+              static func mimeType(for ext: String) -> String {
+                  switch ext.lowercased() {
+                  case "html", "htm": return "text/html"
+                  case "js": return "application/javascript"
+                  case "wasm": return "application/wasm"
+                  case "json": return "application/json"
+                  case "css": return "text/css"
+                  case "png": return "image/png"
+                  case "jpg", "jpeg": return "image/jpeg"
+                  case "svg": return "image/svg+xml"
+                  case "ico": return "image/x-icon"
+                  case "woff2": return "font/woff2"
+                  case "woff": return "font/woff"
+                  case "ttf": return "font/ttf"
+                  case "data", "bin": return "application/octet-stream"
+                  case "zip": return "application/zip"
+                  default: return "application/octet-stream"
+                  }
+              }
+          }
+
+          // ═══════════════════════════════════════════════════════
+          // JS Console Logger - captures Godot errors
+          // ═══════════════════════════════════════════════════════
+          class GodotConsoleLogger: NSObject, WKScriptMessageHandler {
+              func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+                  if let body = message.body as? String {
+                      print("🌐 [Godot Console] \(body)")
+                  }
+              }
+          }
 
           @main
           struct GodotWebEditorApp: App {
               var body: some Scene {
                   WindowGroup {
-                      ContentView()
+                      GodotEditorView()
                           .edgesIgnoringSafeArea(.all)
                   }
               }
           }
 
-          struct ContentView: UIViewRepresentable {
+          struct GodotEditorView: UIViewRepresentable {
               func makeUIView(context: Context) -> WKWebView {
-                  let cfg = WKWebViewConfiguration()
-                  cfg.preferences.javaScriptEnabled = true
+                  let config = WKWebViewConfiguration()
 
-                  let wv = WKWebView(frame: .zero, configuration: cfg)
-                  wv.scrollView.bounces = false
-                  wv.backgroundColor = .black
-                  wv.isOpaque = true
+                  // Enable JS
+                  config.preferences.javaScriptEnabled = true
 
-                  if let url = Bundle.main.url(
-                      forResource: "index",
-                      withExtension: "html",
-                      subdirectory: "godot_editor"
-                  ) {
-                      let base = url.deletingLastPathComponent()
-                      wv.loadFileURL(url, allowingReadAccessTo: base)
-                  } else {
-                      wv.loadHTMLString("""
-                      <html><body style="background:#000;color:#fff;font-family:sans-serif;
-                      display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
-                      <div style="text-align:center;"><h1>⚠️ Godot Files Missing</h1>
-                      <p>index.html not found in app bundle</p></div></body></html>
-                      """, baseURL: nil)
+                  // Allow large memory for WASM
+                  if #available(iOS 15.0, *) {
+                      let prefs = WKWebpagePreferences()
+                      prefs.allowsContentJavaScript = true
+                      config.defaultWebpagePreferences = prefs
                   }
-                  return wv
+
+                  // Register custom URL scheme handler
+                  config.setURLSchemeHandler(GodotSchemeHandler(), forURLScheme: "godot")
+
+                  // Console logger
+                  let logger = GodotConsoleLogger()
+                  config.userContentController.add(logger, name: "godotLog")
+
+                  // Inject console capture script
+                  let consoleScript = """
+                  (function() {
+                      const originalLog = console.log;
+                      const originalError = console.error;
+                      const originalWarn = console.warn;
+
+                      function sendToNative(level, args) {
+                          const msg = args.map(a => String(a)).join(' ');
+                          window.webkit.messageHandlers.godotLog.postMessage(`[${level}] ${msg}`);
+                      }
+
+                      console.log = function(...args) { sendToNative('LOG', args); originalLog.apply(console, args); };
+                      console.error = function(...args) { sendToNative('ERROR', args); originalError.apply(console, args); };
+                      console.warn = function(...args) { sendToNative('WARN', args); originalWarn.apply(console, args); };
+
+                      window.onerror = function(msg, url, line) {
+                          sendToNative('FATAL', [`${msg} at ${url}:${line}`]);
+                      };
+                  })();
+                  """
+                  let userScript = WKUserScript(source: consoleScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+                  config.userContentController.addUserScript(userScript)
+
+                  let webView = WKWebView(frame: .zero, configuration: config)
+                  webView.scrollView.bounces = false
+                  webView.backgroundColor = .black
+                  webView.isOpaque = true
+
+                  // Load via custom scheme (solves CORS/WASM issues)
+                  if let url = URL(string: "godot://localhost/index.html") {
+                      let request = URLRequest(url: url)
+                      webView.load(request)
+                  }
+
+                  return webView
               }
 
               func updateUIView(_ uiView: WKWebView, context: Context) {}
@@ -263,7 +339,7 @@ jobs:
                                           <color key="textColor" red="0.93725490570000003" green="0.93725490570000003" blue="0.95686274770000002" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                                           <nil key="highlightedColor"/>
                                       </label>
-                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • Pre-built • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
+                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • URL Scheme • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
                                           <rect key="frame" x="0.0" y="314.66666666666669" width="393" height="21"/>
                                           <fontDescription key="fontDescription" type="system" pointSize="15"/>
                                           <color key="textColor" red="0.5803921569" green="0.5960784314" blue="0.6392156863" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
@@ -291,7 +367,7 @@ jobs:
           echo '{"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/Contents.json
           echo '{"images":[{"filename":"appicon.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json
 
-          # ── App Icon (pure Python) ──
+          # ── App Icon ──
           python3 << 'PYEOF'
           import struct, zlib
           w, h = 1024, 1024
@@ -339,9 +415,6 @@ jobs:
           xcodegen generate
           cd ..
 
-          echo "📂 Project generated. Verifying structure:"
-          find GodotWebEditor -type f | head -20
-
       # ═══════════════════════════════════════════════════════
       # STEP 6: Build Unsigned .app
       # ═══════════════════════════════════════════════════════
@@ -355,7 +428,7 @@ jobs:
           cd ..
 
       # ═══════════════════════════════════════════════════════
-      # STEP 7: Verify & Fix .app Bundle
+      # STEP 7: Verify .app Bundle
       # ═══════════════════════════════════════════════════════
       - name: 7️⃣ Verify .app Bundle
         run: |
@@ -371,28 +444,22 @@ jobs:
 
           echo "✅ Found app: $APP_PATH"
           echo ""
-          echo "📂 .app contents BEFORE fix:"
+          echo "📂 .app contents:"
           ls -la "$APP_PATH/"
 
-          # Check if godot_editor folder exists in app
+          # Check godot_editor folder
           if [ ! -d "$APP_PATH/godot_editor" ]; then
-            echo "⚠️ godot_editor folder missing from .app! Manually copying..."
+            echo "⚠️ godot_editor missing! Manually copying..."
             mkdir -p "$APP_PATH/godot_editor"
             cp -R GodotWebEditor/Resources/godot_editor/* "$APP_PATH/godot_editor/"
-            echo "✅ Copied Godot files into .app"
           fi
 
           echo ""
-          echo "📂 godot_editor in .app:"
+          echo "📂 godot_editor in .app ($(du -sh "$APP_PATH/godot_editor" | cut -f1)):"
           ls -la "$APP_PATH/godot_editor/"
 
           echo ""
-          echo "📊 .app total size:"
-          du -sh "$APP_PATH"
-
-          echo ""
-          echo "📊 godot_editor size in .app:"
-          du -sh "$APP_PATH/godot_editor"
+          echo "📊 Total .app size: $(du -sh "$APP_PATH" | cut -f1)"
 
       # ═══════════════════════════════════════════════════════
       # STEP 8: Package IPA
@@ -414,16 +481,10 @@ jobs:
           rm -rf Payload
 
           echo "IPA_NAME=$IPA_NAME" >> "$GITHUB_ENV"
-          echo ""
-          echo "✅ Created: $IPA_NAME"
-          ls -lh "$IPA_NAME"
-
-          echo ""
-          echo "📊 IPA size:"
-          du -sh "$IPA_NAME"
+          echo "✅ Created: $IPA_NAME ($(du -sh "$IPA_NAME" | cut -f1))"
 
       # ═══════════════════════════════════════════════════════
-      # STEP 9: Upload Artifact
+      # STEP 9: Upload
       # ═══════════════════════════════════════════════════════
       - name: 9️⃣ Upload IPA
         uses: actions/upload-artifact@v4
@@ -440,6 +501,7 @@ jobs:
           echo "╠══════════════════════════════════════════════════════╣"
           echo "║  📁 File: $IPA_NAME                                  ║"
           echo "║  📱 Install: AltStore / Sideloadly / Scarlet         ║"
+          echo "║  🔧 Fix: URL Scheme Handler for WASM/CORS            ║"
           echo "╚══════════════════════════════════════════════════════╝"
         env:
           IPA_NAME: ${{ env.IPA_NAME }}
