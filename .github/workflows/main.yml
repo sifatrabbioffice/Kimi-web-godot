@@ -89,11 +89,19 @@ jobs:
           fi
 
           echo "✅ Ready. Size: $(du -sh . | cut -f1), Files: $(find . -type f | wc -l)"
+          ls -la
           cd ..
 
       # ═══════════════════════════════════════════════════════
-      # STEP 5: Create iOS App with URL Scheme Handler
+      # STEP 5: Create iOS App with HTTP Server + WKWebView
       # ═══════════════════════════════════════════════════════
+      # 
+      # WHY HTTP SERVER instead of URL Scheme Handler?
+      # - URL Scheme (godot://) does NOT support Web Workers
+      # - Godot Web Editor uses Web Workers for multi-threading
+      # - HTTP localhost supports Workers, WASM, SharedArrayBuffer
+      # - This is the ONLY reliable way to run Godot offline
+      #
       - name: 5️⃣ Create iOS App
         run: |
           set -ex
@@ -106,78 +114,154 @@ jobs:
           cp -R godot_editor/* GodotWebEditor/Resources/godot_editor/
           echo "✅ Copied $(find GodotWebEditor/Resources/godot_editor -type f | wc -l) files"
 
-          # ── SwiftUI App with URL Scheme Handler ──
+          # ── SwiftUI App with Embedded HTTP Server ──
           cat > GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
           import SwiftUI
           import WebKit
+          import Foundation
+          import Network
 
           // ═══════════════════════════════════════════════════════
-          // Custom URL Scheme Handler - serves local files with
-          // proper MIME types and CORS headers for WebAssembly
+          // Tiny HTTP Server using Network.framework (iOS 12+)
+          // Serves files from app bundle's godot_editor folder
           // ═══════════════════════════════════════════════════════
-          class GodotSchemeHandler: NSObject, WKURLSchemeHandler {
-              func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
-                  guard let url = urlSchemeTask.request.url else {
-                      urlSchemeTask.didFailWithError(NSError(domain: "InvalidURL", code: 400))
-                      return
-                  }
+          class TinyHTTPServer: NSObject {
+              private var listener: NWListener?
+              private let port: UInt16
+              private let basePath: String
 
-                  let path = url.path
-                  let fileName = (path as NSString).lastPathComponent
-                  let fileExt = (path as NSString).pathExtension
-
-                  // Map path to bundle resource
-                  var resourceURL: URL?
-                  if path == "/" || path == "/index.html" {
-                      resourceURL = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "godot_editor")
-                  } else {
-                      resourceURL = Bundle.main.url(forResource: fileName, withExtension: "", subdirectory: "godot_editor")
-                      // Try without extension if not found
-                      if resourceURL == nil && !fileExt.isEmpty {
-                          let nameWithoutExt = (fileName as NSString).deletingPathExtension
-                          resourceURL = Bundle.main.url(forResource: nameWithoutExt, withExtension: fileExt, subdirectory: "godot_editor")
-                      }
-                  }
-
-                  guard let fileURL = resourceURL,
-                        let data = try? Data(contentsOf: fileURL) else {
-                      print("❌ GodotScheme: File not found: \(path)")
-                      urlSchemeTask.didFailWithError(NSError(domain: "NotFound", code: 404))
-                      return
-                  }
-
-                  let mimeType = Self.mimeType(for: fileExt)
-
-                  // Required headers for WebAssembly + SharedArrayBuffer
-                  let headers = [
-                      "Content-Type": mimeType,
-                      "Content-Length": String(data.count),
-                      "Cross-Origin-Opener-Policy": "same-origin",
-                      "Cross-Origin-Embedder-Policy": "require-corp",
-                      "Access-Control-Allow-Origin": "*"
-                  ]
-
-                  guard let response = HTTPURLResponse(
-                      url: url,
-                      statusCode: 200,
-                      httpVersion: "HTTP/1.1",
-                      headerFields: headers
-                  ) else {
-                      urlSchemeTask.didFailWithError(NSError(domain: "ResponseError", code: 500))
-                      return
-                  }
-
-                  urlSchemeTask.didReceive(response)
-                  urlSchemeTask.didReceive(data)
-                  urlSchemeTask.didFinish()
+              init(port: UInt16, basePath: String) {
+                  self.port = port
+                  self.basePath = basePath
+                  super.init()
               }
 
-              func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
+              func start() {
+                  do {
+                      let parameters = NWParameters.tcp
+                      listener = try NWListener(using: parameters, on: NWEndpoint.Port(integerLiteral: port))
 
-              static func mimeType(for ext: String) -> String {
-                  switch ext.lowercased() {
-                  case "html", "htm": return "text/html"
-                  case "js": return "application/javascript"
+                      listener?.stateUpdateHandler = { state in
+                          switch state {
+                          case .ready:
+                              print("🌐 HTTP Server ready on port \(self.port)")
+                          case .failed(let error):
+                              print("❌ HTTP Server failed: \(error)")
+                          default:
+                              break
+                          }
+                      }
+
+                      listener?.newConnectionHandler = { [weak self] connection in
+                          self?.handleConnection(connection)
+                      }
+
+                      listener?.start(queue: .global())
+                  } catch {
+                      print("❌ Failed to start HTTP server: \(error)")
+                  }
+              }
+
+              func stop() {
+                  listener?.cancel()
+              }
+
+              private func handleConnection(_ connection: NWConnection) {
+                  connection.start(queue: .global())
+
+                  connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
+                      guard let self = self else { return }
+
+                      if let error = error {
+                          print("❌ Connection error: \(error)")
+                          connection.cancel()
+                          return
+                      }
+
+                      guard let data = data, let request = String(data: data, encoding: .utf8) else {
+                          connection.cancel()
+                          return
+                      }
+
+                      // Parse request line: GET /path HTTP/1.1
+                      let lines = request.split(separator: "\r\n")
+                      guard let firstLine = lines.first else {
+                          self.sendError(connection, status: 400)
+                          return
+                      }
+
+                      let parts = firstLine.split(separator: " ")
+                      guard parts.count >= 2 else {
+                          self.sendError(connection, status: 400)
+                          return
+                      }
+
+                      let path = String(parts[1])
+                      self.serveFile(connection, path: path)
+                  }
+              }
+
+              private func serveFile(_ connection: NWConnection, path: String) {
+                  var filePath = basePath + path
+                  if path == "/" || path.isEmpty {
+                      filePath = basePath + "/index.html"
+                  }
+
+                  // Security: prevent directory traversal
+                  let resolvedPath = (filePath as NSString).standardizingPath
+                  let resolvedBase = (basePath as NSString).standardizingPath
+                  guard resolvedPath.hasPrefix(resolvedBase) else {
+                      sendError(connection, status: 403)
+                      return
+                  }
+
+                  guard FileManager.default.fileExists(atPath: resolvedPath) else {
+                      print("❌ HTTP 404: \(path)")
+                      sendError(connection, status: 404)
+                      return
+                  }
+
+                  guard let fileData = FileManager.default.contents(atPath: resolvedPath) else {
+                      sendError(connection, status: 500)
+                      return
+                  }
+
+                  let mimeType = Self.mimeType(for: resolvedPath)
+                  let headers = """
+                  HTTP/1.1 200 OK\r\n                  Content-Type: \(mimeType)\r\n                  Content-Length: \(fileData.count)\r\n                  Cross-Origin-Opener-Policy: same-origin\r\n                  Cross-Origin-Embedder-Policy: require-corp\r\n                  Access-Control-Allow-Origin: *\r\n                  Connection: close\r\n\r\n
+                  """
+
+                  guard let headerData = headers.data(using: .utf8) else {
+                      sendError(connection, status: 500)
+                      return
+                  }
+
+                  print("✅ HTTP 200: \(path) (\(fileData.count) bytes, \(mimeType))")
+
+                  connection.send(content: headerData, completion: .contentProcessed { _ in
+                      connection.send(content: fileData, completion: .contentProcessed { _ in
+                          connection.cancel()
+                      })
+                  })
+              }
+
+              private func sendError(_ connection: NWConnection, status: Int) {
+                  let message = status == 404 ? "Not Found" : (status == 403 ? "Forbidden" : "Internal Server Error")
+                  let response = "HTTP/1.1 \(status) \(message)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                  guard let data = response.data(using: .utf8) else {
+                      connection.cancel()
+                      return
+                  }
+                  connection.send(content: data, completion: .contentProcessed { _ in
+                      connection.cancel()
+                  })
+              }
+
+              private static func mimeType(for path: String) -> String {
+                  let ext = (path as NSString).pathExtension.lowercased()
+                  switch ext {
+                  case "html", "htm": return "text/html; charset=utf-8"
+                  case "js", "mjs": return "application/javascript; charset=utf-8"
                   case "wasm": return "application/wasm"
                   case "json": return "application/json"
                   case "css": return "text/css"
@@ -188,20 +272,23 @@ jobs:
                   case "woff2": return "font/woff2"
                   case "woff": return "font/woff"
                   case "ttf": return "font/ttf"
-                  case "data", "bin": return "application/octet-stream"
+                  case "otf": return "font/otf"
+                  case "data", "bin", "pck": return "application/octet-stream"
                   case "zip": return "application/zip"
+                  case "xml": return "application/xml"
+                  case "txt": return "text/plain"
                   default: return "application/octet-stream"
                   }
               }
           }
 
           // ═══════════════════════════════════════════════════════
-          // JS Console Logger - captures Godot errors
+          // Console Logger
           // ═══════════════════════════════════════════════════════
-          class GodotConsoleLogger: NSObject, WKScriptMessageHandler {
+          class GodotLogger: NSObject, WKScriptMessageHandler {
               func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
                   if let body = message.body as? String {
-                      print("🌐 [Godot Console] \(body)")
+                      print("🌐 [Godot] \(body)")
                   }
               }
           }
@@ -219,63 +306,71 @@ jobs:
           struct GodotEditorView: UIViewRepresentable {
               func makeUIView(context: Context) -> WKWebView {
                   let config = WKWebViewConfiguration()
-
-                  // Enable JS
                   config.preferences.javaScriptEnabled = true
 
-                  // Allow large memory for WASM
                   if #available(iOS 15.0, *) {
                       let prefs = WKWebpagePreferences()
                       prefs.allowsContentJavaScript = true
                       config.defaultWebpagePreferences = prefs
                   }
 
-                  // Register custom URL scheme handler
-                  config.setURLSchemeHandler(GodotSchemeHandler(), forURLScheme: "godot")
-
                   // Console logger
-                  let logger = GodotConsoleLogger()
+                  let logger = GodotLogger()
                   config.userContentController.add(logger, name: "godotLog")
 
-                  // Inject console capture script
+                  // Inject console capture
                   let consoleScript = """
                   (function() {
-                      const originalLog = console.log;
-                      const originalError = console.error;
-                      const originalWarn = console.warn;
-
-                      function sendToNative(level, args) {
-                          const msg = args.map(a => String(a)).join(' ');
-                          window.webkit.messageHandlers.godotLog.postMessage(`[${level}] ${msg}`);
+                      const origLog = console.log, origErr = console.error, origWarn = console.warn;
+                      function send(lvl, args) {
+                          try { window.webkit.messageHandlers.godotLog.postMessage(`[${lvl}] ` + args.map(String).join(' ')); } catch(e) {}
                       }
-
-                      console.log = function(...args) { sendToNative('LOG', args); originalLog.apply(console, args); };
-                      console.error = function(...args) { sendToNative('ERROR', args); originalError.apply(console, args); };
-                      console.warn = function(...args) { sendToNative('WARN', args); originalWarn.apply(console, args); };
-
-                      window.onerror = function(msg, url, line) {
-                          sendToNative('FATAL', [`${msg} at ${url}:${line}`]);
-                      };
+                      console.log = function(...a) { send('LOG', a); origLog.apply(console, a); };
+                      console.error = function(...a) { send('ERROR', a); origErr.apply(console, a); };
+                      console.warn = function(...a) { send('WARN', a); origWarn.apply(console, a); };
+                      window.onerror = function(m,u,l,c,err) { send('FATAL', [`${m} at ${u}:${l}:${c}`]); return false; };
+                      window.onunhandledrejection = function(e) { send('REJECT', [`Unhandled: ${e.reason}`]); };
+                      console.log("Godot iOS: JS injected OK");
+                      console.log("crossOriginIsolated: " + window.crossOriginIsolated);
+                      console.log("SharedArrayBuffer: " + (typeof SharedArrayBuffer !== 'undefined' ? 'YES' : 'NO'));
                   })();
                   """
-                  let userScript = WKUserScript(source: consoleScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
-                  config.userContentController.addUserScript(userScript)
+                  config.userContentController.addUserScript(
+                      WKUserScript(source: consoleScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+                  )
 
                   let webView = WKWebView(frame: .zero, configuration: config)
                   webView.scrollView.bounces = false
                   webView.backgroundColor = .black
                   webView.isOpaque = true
+                  webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
 
-                  // Load via custom scheme (solves CORS/WASM issues)
-                  if let url = URL(string: "godot://localhost/index.html") {
-                      let request = URLRequest(url: url)
-                      webView.load(request)
+                  // Start HTTP server
+                  let godotPath = Bundle.main.bundlePath + "/godot_editor"
+                  let server = TinyHTTPServer(port: 8080, basePath: godotPath)
+                  server.start()
+
+                  // Keep server alive
+                  context.coordinator.server = server
+
+                  // Load from localhost
+                  if let url = URL(string: "http://127.0.0.1:8080/index.html") {
+                      print("🚀 Loading Godot from: \(url)")
+                      webView.load(URLRequest(url: url))
                   }
 
                   return webView
               }
 
               func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+              func makeCoordinator() -> Coordinator {
+                  Coordinator()
+              }
+
+              class Coordinator: NSObject {
+                  var server: TinyHTTPServer?
+              }
           }
           SWIFTEOF
 
@@ -339,7 +434,7 @@ jobs:
                                           <color key="textColor" red="0.93725490570000003" green="0.93725490570000003" blue="0.95686274770000002" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                                           <nil key="highlightedColor"/>
                                       </label>
-                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • URL Scheme • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
+                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • Local HTTP Server • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
                                           <rect key="frame" x="0.0" y="314.66666666666669" width="393" height="21"/>
                                           <fontDescription key="fontDescription" type="system" pointSize="15"/>
                                           <color key="textColor" red="0.5803921569" green="0.5960784314" blue="0.6392156863" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
@@ -447,18 +542,17 @@ jobs:
           echo "📂 .app contents:"
           ls -la "$APP_PATH/"
 
-          # Check godot_editor folder
           if [ ! -d "$APP_PATH/godot_editor" ]; then
-            echo "⚠️ godot_editor missing! Manually copying..."
+            echo "⚠️ godot_editor missing! Copying manually..."
             mkdir -p "$APP_PATH/godot_editor"
             cp -R GodotWebEditor/Resources/godot_editor/* "$APP_PATH/godot_editor/"
           fi
 
           echo ""
-          echo "📂 godot_editor in .app ($(du -sh "$APP_PATH/godot_editor" | cut -f1)):"
+          echo "📂 godot_editor in .app:"
           ls -la "$APP_PATH/godot_editor/"
-
           echo ""
+          echo "📊 godot_editor size: $(du -sh "$APP_PATH/godot_editor" | cut -f1)"
           echo "📊 Total .app size: $(du -sh "$APP_PATH" | cut -f1)"
 
       # ═══════════════════════════════════════════════════════
@@ -501,7 +595,8 @@ jobs:
           echo "╠══════════════════════════════════════════════════════╣"
           echo "║  📁 File: $IPA_NAME                                  ║"
           echo "║  📱 Install: AltStore / Sideloadly / Scarlet         ║"
-          echo "║  🔧 Fix: URL Scheme Handler for WASM/CORS            ║"
+          echo "║  🔧 Fix: Local HTTP Server (localhost:8080)          ║"
+          echo "║  ✅ Supports: Web Workers + WASM + SharedArrayBuffer ║"
           echo "╚══════════════════════════════════════════════════════╝"
         env:
           IPA_NAME: ${{ env.IPA_NAME }}
