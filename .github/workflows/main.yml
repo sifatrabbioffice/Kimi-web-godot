@@ -45,7 +45,7 @@ jobs:
       # ═══════════════════════════════════════════════════════
       - name: 4️⃣ Download Godot Web Editor
         run: |
-          set -e
+          set -ex
           VERSION="${{ github.event.inputs.godot_version || '4.6' }}"
           STATUS="${{ github.event.inputs.godot_status || 'stable' }}"
 
@@ -62,8 +62,9 @@ jobs:
 
           if curl -fsL -o web_editor.zip "$URL1"; then
             echo "✅ Downloaded from GitHub releases"
+            ls -la web_editor.zip
           else
-            # Fallback: Tuxfamily mirror
+            echo "❌ GitHub releases failed, trying Tuxfamily..."
             URL2="https://downloads.tuxfamily.org/godotengine/${VERSION}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
             echo "Trying: $URL2"
             curl -fsL -o web_editor.zip "$URL2" || {
@@ -73,34 +74,56 @@ jobs:
             echo "✅ Downloaded from Tuxfamily"
           fi
 
-          echo "📦 Extracting..."
+          echo ""
+          echo "📦 ZIP file info:"
+          ls -la web_editor.zip
+          file web_editor.zip
+
+          echo ""
+          echo "📂 ZIP contents:"
+          unzip -l web_editor.zip | head -30
+
+          echo ""
+          echo "📂 Extracting..."
           unzip -q web_editor.zip
           rm -f web_editor.zip
 
-          # Rename main HTML to index.html if needed
-          for f in godot.editor.html godot.web.editor.html godot.html; do
-            if [ -f "$f" ] && [ ! -f index.html ]; then
+          echo ""
+          echo "📂 After extract - listing all files:"
+          ls -la
+
+          # Check if files are in a subdirectory (flatten if needed)
+          SUBDIR=$(find . -maxdepth 1 -type d | grep -v '^\.$' | head -n 1)
+          if [ -n "$SUBDIR" ] && [ -d "$SUBDIR" ]; then
+            echo ""
+            echo "📁 Found subdirectory: $SUBDIR"
+            echo "📁 Moving files up..."
+            mv "$SUBDIR"/* . 2>/dev/null || true
+            rmdir "$SUBDIR" 2>/dev/null || true
+            echo "📂 After flatten:"
+            ls -la
+          fi
+
+          # Rename main HTML to index.html
+          for f in godot.editor.html godot.web.editor.html godot.html index.html; do
+            if [ -f "$f" ] && [ "$f" != "index.html" ]; then
               mv "$f" index.html
               echo "📝 Renamed $f → index.html"
               break
             fi
           done
 
-          # If still no index.html, find any html file
           if [ ! -f index.html ]; then
-            HTML_FILE=$(find . -name "*.html" -type f | head -n 1)
-            if [ -n "$HTML_FILE" ]; then
-              mv "$HTML_FILE" index.html
-              echo "📝 Renamed $(basename "$HTML_FILE") → index.html"
-            else
-              echo "❌ No HTML file found!"
-              exit 1
-            fi
+            echo "❌ No index.html found! Files present:"
+            ls -la
+            exit 1
           fi
 
           echo ""
-          echo "📂 Files in godot_editor:"
-          ls -lah
+          echo "✅ Godot Web Editor ready. Total size:"
+          du -sh .
+          echo "File count: $(find . -type f | wc -l)"
+
           cd ..
 
       # ═══════════════════════════════════════════════════════
@@ -108,9 +131,12 @@ jobs:
       # ═══════════════════════════════════════════════════════
       - name: 5️⃣ Create iOS App
         run: |
-          set -e
+          set -ex
 
           # Verify godot_editor has files
+          echo "📂 Verifying godot_editor/ contents:"
+          ls -la godot_editor/
+
           if [ ! -f godot_editor/index.html ]; then
             echo "❌ godot_editor/index.html missing!"
             exit 1
@@ -123,8 +149,12 @@ jobs:
           mkdir -p GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset
 
           # Copy ALL Godot files into app bundle (fully offline)
+          echo "📂 Copying Godot files to Resources..."
           cp -R godot_editor/* GodotWebEditor/Resources/godot_editor/
-          echo "✅ Copied $(ls godot_editor | wc -l) files to app bundle"
+
+          echo "📂 Verifying Resources/godot_editor/ contents:"
+          ls -la GodotWebEditor/Resources/godot_editor/
+          echo "Resources size: $(du -sh GodotWebEditor/Resources/)"
 
           # ── SwiftUI App ──
           cat > GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
@@ -158,6 +188,13 @@ jobs:
                   ) {
                       let base = url.deletingLastPathComponent()
                       wv.loadFileURL(url, allowingReadAccessTo: base)
+                  } else {
+                      wv.loadHTMLString("""
+                      <html><body style="background:#000;color:#fff;font-family:sans-serif;
+                      display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+                      <div style="text-align:center;"><h1>⚠️ Godot Files Missing</h1>
+                      <p>index.html not found in app bundle</p></div></body></html>
+                      """, baseURL: nil)
                   }
                   return wv
               }
@@ -172,32 +209,18 @@ jobs:
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-              <key>CFBundleDevelopmentRegion</key>
-              <string>en</string>
-              <key>CFBundleDisplayName</key>
-              <string>Godot Editor</string>
-              <key>CFBundleExecutable</key>
-              <string>GodotWebEditor</string>
-              <key>CFBundleIdentifier</key>
-              <string>com.godot.webeditor.local</string>
-              <key>CFBundleInfoDictionaryVersion</key>
-              <string>6.0</string>
-              <key>CFBundleName</key>
-              <string>GodotWebEditor</string>
-              <key>CFBundlePackageType</key>
-              <string>APPL</string>
-              <key>CFBundleShortVersionString</key>
-              <string>1.0.0</string>
-              <key>CFBundleVersion</key>
-              <string>1</string>
-              <key>LSRequiresIPhoneOS</key>
-              <true/>
-              <key>UILaunchStoryboardName</key>
-              <string>LaunchScreen</string>
-              <key>UIRequiredDeviceCapabilities</key>
-              <array>
-                  <string>arm64</string>
-              </array>
+              <key>CFBundleDevelopmentRegion</key><string>en</string>
+              <key>CFBundleDisplayName</key><string>Godot Editor</string>
+              <key>CFBundleExecutable</key><string>GodotWebEditor</string>
+              <key>CFBundleIdentifier</key><string>com.godot.webeditor.local</string>
+              <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+              <key>CFBundleName</key><string>GodotWebEditor</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleShortVersionString</key><string>1.0.0</string>
+              <key>CFBundleVersion</key><string>1</string>
+              <key>LSRequiresIPhoneOS</key><true/>
+              <key>UILaunchStoryboardName</key><string>LaunchScreen</string>
+              <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
               <key>UISupportedInterfaceOrientations</key>
               <array>
                   <string>UIInterfaceOrientationPortrait</string>
@@ -211,10 +234,8 @@ jobs:
                   <string>UIInterfaceOrientationLandscapeLeft</string>
                   <string>UIInterfaceOrientationLandscapeRight</string>
               </array>
-              <key>UIViewControllerBasedStatusBarAppearance</key>
-              <true/>
-              <key>UIStatusBarHidden</key>
-              <true/>
+              <key>UIViewControllerBasedStatusBarAppearance</key><true/>
+              <key>UIStatusBarHidden</key><true/>
           </dict>
           </plist>
           PLISTEOF
@@ -270,7 +291,7 @@ jobs:
           echo '{"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/Contents.json
           echo '{"images":[{"filename":"appicon.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json
 
-          # ── App Icon (pure Python, zero deps) ──
+          # ── App Icon (pure Python) ──
           python3 << 'PYEOF'
           import struct, zlib
           w, h = 1024, 1024
@@ -318,12 +339,15 @@ jobs:
           xcodegen generate
           cd ..
 
+          echo "📂 Project generated. Verifying structure:"
+          find GodotWebEditor -type f | head -20
+
       # ═══════════════════════════════════════════════════════
       # STEP 6: Build Unsigned .app
       # ═══════════════════════════════════════════════════════
       - name: 6️⃣ Build Unsigned .app
         run: |
-          set -e
+          set -ex
           cd GodotWebEditor
 
           xcodebuild             -project GodotWebEditor.xcodeproj             -scheme GodotWebEditor             -configuration Release             -destination 'generic/platform=iOS'             -derivedDataPath ../DerivedData             CODE_SIGN_IDENTITY=""             CODE_SIGNING_REQUIRED=NO             CODE_SIGNING_ALLOWED=NO             DEVELOPMENT_TEAM=""             PROVISIONING_PROFILE_SPECIFIER=""             ONLY_ACTIVE_ARCH=NO             ARCHS="arm64"             VALID_ARCHS="arm64"             ENABLE_BITCODE=NO             clean build
@@ -331,11 +355,11 @@ jobs:
           cd ..
 
       # ═══════════════════════════════════════════════════════
-      # STEP 7: Package IPA
+      # STEP 7: Verify & Fix .app Bundle
       # ═══════════════════════════════════════════════════════
-      - name: 7️⃣ Package IPA
+      - name: 7️⃣ Verify .app Bundle
         run: |
-          set -e
+          set -ex
 
           APP_PATH=$(find DerivedData -name "GodotWebEditor.app" -type d | head -n 1)
 
@@ -346,6 +370,38 @@ jobs:
           fi
 
           echo "✅ Found app: $APP_PATH"
+          echo ""
+          echo "📂 .app contents BEFORE fix:"
+          ls -la "$APP_PATH/"
+
+          # Check if godot_editor folder exists in app
+          if [ ! -d "$APP_PATH/godot_editor" ]; then
+            echo "⚠️ godot_editor folder missing from .app! Manually copying..."
+            mkdir -p "$APP_PATH/godot_editor"
+            cp -R GodotWebEditor/Resources/godot_editor/* "$APP_PATH/godot_editor/"
+            echo "✅ Copied Godot files into .app"
+          fi
+
+          echo ""
+          echo "📂 godot_editor in .app:"
+          ls -la "$APP_PATH/godot_editor/"
+
+          echo ""
+          echo "📊 .app total size:"
+          du -sh "$APP_PATH"
+
+          echo ""
+          echo "📊 godot_editor size in .app:"
+          du -sh "$APP_PATH/godot_editor"
+
+      # ═══════════════════════════════════════════════════════
+      # STEP 8: Package IPA
+      # ═══════════════════════════════════════════════════════
+      - name: 8️⃣ Package IPA
+        run: |
+          set -ex
+
+          APP_PATH=$(find DerivedData -name "GodotWebEditor.app" -type d | head -n 1)
 
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
@@ -358,13 +414,18 @@ jobs:
           rm -rf Payload
 
           echo "IPA_NAME=$IPA_NAME" >> "$GITHUB_ENV"
+          echo ""
           echo "✅ Created: $IPA_NAME"
           ls -lh "$IPA_NAME"
 
+          echo ""
+          echo "📊 IPA size:"
+          du -sh "$IPA_NAME"
+
       # ═══════════════════════════════════════════════════════
-      # STEP 8: Upload Artifact
+      # STEP 9: Upload Artifact
       # ═══════════════════════════════════════════════════════
-      - name: 8️⃣ Upload IPA
+      - name: 9️⃣ Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: godot-web-editor-ipa
