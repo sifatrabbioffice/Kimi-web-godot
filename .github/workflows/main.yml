@@ -10,7 +10,7 @@ on:
       godot_version:
         description: 'Godot Version'
         required: true
-        default: '4.6'
+        default: '4.3'
       godot_status:
         description: 'Release Status'
         required: true
@@ -37,7 +37,7 @@ jobs:
       - name: 4️⃣ Download Godot Web Editor
         run: |
           set -ex
-          VERSION="${{ github.event.inputs.godot_version || '4.6' }}"
+          VERSION="${{ github.event.inputs.godot_version || '4.3' }}"
           STATUS="${{ github.event.inputs.godot_status || 'stable' }}"
 
           echo "=========================================="
@@ -47,33 +47,36 @@ jobs:
           mkdir -p godot_editor
           cd godot_editor
 
-          URL1="https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
-          echo "Trying: $URL1"
+          SOURCES=(
+            "https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
+            "https://downloads.tuxfamily.org/godotengine/${VERSION}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
+            "https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/web_editor.zip"
+          )
 
-          if curl -fsL -o web_editor.zip "$URL1"; then
-            echo "✅ Downloaded from GitHub releases"
-          else
-            URL2="https://downloads.tuxfamily.org/godotengine/${VERSION}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
-            echo "Trying: $URL2"
-            curl -fsL -o web_editor.zip "$URL2" || {
-              echo "❌ Failed to download from both sources"
-              exit 1
-            }
-            echo "✅ Downloaded from Tuxfamily"
+          for URL in "${SOURCES[@]}"; do
+            echo "Trying: $URL"
+            if curl -fsL --max-time 60 -o web_editor.zip "$URL"; then
+              echo "✅ Downloaded"
+              break
+            fi
+            echo "❌ Failed"
+          done
+
+          if [ ! -f web_editor.zip ] || [ ! -s web_editor.zip ]; then
+            echo "❌ All sources failed"
+            exit 1
           fi
 
-          echo "📦 ZIP size: $(ls -lh web_editor.zip | awk '{print $5}')"
-          unzip -q web_editor.zip
+          echo "📦 ZIP: $(ls -lh web_editor.zip | awk '{print $5}')"
+          unzip -q web_editor.zip || { echo "❌ Bad ZIP"; exit 1; }
           rm -f web_editor.zip
 
-          # Flatten subdirectory if present
           SUBDIR=$(find . -maxdepth 1 -type d | grep -v '^\.$' | head -n 1)
           if [ -n "$SUBDIR" ] && [ -d "$SUBDIR" ]; then
             mv "$SUBDIR"/* . 2>/dev/null || true
             rmdir "$SUBDIR" 2>/dev/null || true
           fi
 
-          # Rename main HTML
           for f in godot.editor.html godot.web.editor.html godot.html; do
             if [ -f "$f" ] && [ "$f" != "index.html" ]; then
               mv "$f" index.html
@@ -83,25 +86,18 @@ jobs:
           done
 
           if [ ! -f index.html ]; then
-            echo "❌ No index.html found!"
+            echo "❌ No index.html! Files:"
             ls -la
             exit 1
           fi
 
-          echo "✅ Ready. Size: $(du -sh . | cut -f1), Files: $(find . -type f | wc -l)"
+          echo "✅ Ready: $(du -sh . | cut -f1), $(find . -type f | wc -l) files"
           ls -la
           cd ..
 
       # ═══════════════════════════════════════════════════════
-      # STEP 5: Create iOS App with HTTP Server + WKWebView
+      # STEP 5: Create iOS App
       # ═══════════════════════════════════════════════════════
-      # 
-      # WHY HTTP SERVER instead of URL Scheme Handler?
-      # - URL Scheme (godot://) does NOT support Web Workers
-      # - Godot Web Editor uses Web Workers for multi-threading
-      # - HTTP localhost supports Workers, WASM, SharedArrayBuffer
-      # - This is the ONLY reliable way to run Godot offline
-      #
       - name: 5️⃣ Create iOS App
         run: |
           set -ex
@@ -114,151 +110,172 @@ jobs:
           cp -R godot_editor/* GodotWebEditor/Resources/godot_editor/
           echo "✅ Copied $(find GodotWebEditor/Resources/godot_editor -type f | wc -l) files"
 
-          # ── SwiftUI App with Embedded HTTP Server ──
+          # ── SwiftUI App ──
           cat > GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
           import SwiftUI
           import WebKit
-          import Foundation
           import Network
+          import Foundation
 
           // ═══════════════════════════════════════════════════════
-          // Tiny HTTP Server using Network.framework (iOS 12+)
-          // Serves files from app bundle's godot_editor folder
+          // HTTP/1.1 Server using Network.framework
+          // CRITICAL FIX: Uses regular strings for \r\n (not multiline)
           // ═══════════════════════════════════════════════════════
-          class TinyHTTPServer: NSObject {
+          final class LocalHTTPServer: NSObject {
               private var listener: NWListener?
-              private let port: UInt16
-              private let basePath: String
+              private let root: String
+              private var ready = false
 
-              init(port: UInt16, basePath: String) {
-                  self.port = port
-                  self.basePath = basePath
-                  super.init()
+              init(rootPath: String) {
+                  self.root = rootPath
               }
 
-              func start() {
+              func start() -> Bool {
                   do {
-                      let parameters = NWParameters.tcp
-                      listener = try NWListener(using: parameters, on: NWEndpoint.Port(integerLiteral: port))
+                      let params = NWParameters.tcp
+                      listener = try NWListener(using: params, on: NWEndpoint.Port(integerLiteral: 8765))
 
-                      listener?.stateUpdateHandler = { state in
+                      listener?.stateUpdateHandler = { [weak self] state in
                           switch state {
                           case .ready:
-                              print("🌐 HTTP Server ready on port \(self.port)")
-                          case .failed(let error):
-                              print("❌ HTTP Server failed: \(error)")
-                          default:
-                              break
+                              self?.ready = true
+                              print("[SERVER] Ready on port 8765")
+                          case .failed(let err):
+                              print("[SERVER] Failed: \(err)")
+                          case .cancelled:
+                              print("[SERVER] Cancelled")
+                          default: break
                           }
                       }
 
-                      listener?.newConnectionHandler = { [weak self] connection in
-                          self?.handleConnection(connection)
+                      listener?.newConnectionHandler = { [weak self] conn in
+                          self?.handleConnection(conn)
                       }
 
                       listener?.start(queue: .global())
-                  } catch {
-                      print("❌ Failed to start HTTP server: \(error)")
-                  }
-              }
 
-              func stop() {
-                  listener?.cancel()
+                      // Wait up to 3s for ready
+                      for _ in 0..<30 {
+                          if ready { break }
+                          usleep(100000)
+                      }
+                      return ready
+                  } catch {
+                      print("[SERVER] Start error: \(error)")
+                      return false
+                  }
               }
 
               private func handleConnection(_ connection: NWConnection) {
                   connection.start(queue: .global())
+                  readHTTP(connection: connection, buffer: Data())
+              }
 
-                  connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
-                      guard let self = self else { return }
+              private func readHTTP(connection: NWConnection, buffer: Data) {
+                  connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, error in
+                      guard let self = self else { connection.cancel(); return }
 
                       if let error = error {
-                          print("❌ Connection error: \(error)")
+                          print("[SERVER] Recv error: \(error)")
                           connection.cancel()
                           return
                       }
 
-                      guard let data = data, let request = String(data: data, encoding: .utf8) else {
+                      var buf = buffer
+                      if let c = content { buf.append(c) }
+
+                      let sep = Data("\r\n\r\n".utf8)
+                      if let range = buf.range(of: sep) {
+                          let headerBytes = buf.subdata(in: 0..<range.upperBound)
+                          let bodyBytes = buf.subdata(in: range.upperBound..<buf.count)
+
+                          if let requestText = String(data: headerBytes, encoding: .utf8) {
+                              self.serve(connection: connection, request: requestText, bodyData: bodyBytes)
+                              return
+                          }
+                      }
+
+                      if isComplete {
                           connection.cancel()
-                          return
+                      } else {
+                          self.readHTTP(connection: connection, buffer: buf)
                       }
-
-                      // Parse request line: GET /path HTTP/1.1
-                      let lines = request.split(separator: "\r\n")
-                      guard let firstLine = lines.first else {
-                          self.sendError(connection, status: 400)
-                          return
-                      }
-
-                      let parts = firstLine.split(separator: " ")
-                      guard parts.count >= 2 else {
-                          self.sendError(connection, status: 400)
-                          return
-                      }
-
-                      let path = String(parts[1])
-                      self.serveFile(connection, path: path)
                   }
               }
 
-              private func serveFile(_ connection: NWConnection, path: String) {
-                  var filePath = basePath + path
-                  if path == "/" || path.isEmpty {
-                      filePath = basePath + "/index.html"
-                  }
-
-                  // Security: prevent directory traversal
-                  let resolvedPath = (filePath as NSString).standardizingPath
-                  let resolvedBase = (basePath as NSString).standardizingPath
-                  guard resolvedPath.hasPrefix(resolvedBase) else {
-                      sendError(connection, status: 403)
+              private func serve(connection: NWConnection, request: String, bodyData: Data) {
+                  let lines = request.split(separator: "\r\n")
+                  guard let first = lines.first else {
+                      sendHTTP(connection: connection, status: 400, body: Data())
                       return
                   }
 
-                  guard FileManager.default.fileExists(atPath: resolvedPath) else {
-                      print("❌ HTTP 404: \(path)")
-                      sendError(connection, status: 404)
+                  let parts = first.split(separator: " ")
+                  guard parts.count >= 2 else {
+                      sendHTTP(connection: connection, status: 400, body: Data())
                       return
                   }
 
-                  guard let fileData = FileManager.default.contents(atPath: resolvedPath) else {
-                      sendError(connection, status: 500)
+                  let rawPath = String(parts[1])
+                  let path = rawPath == "/" ? "/index.html" : rawPath
+
+                  // Resolve file path securely
+                  let filePath = (root + path).replacingOccurrences(of: "..", with: "")
+                  let stdPath = (filePath as NSString).standardizingPath
+                  let stdRoot = (root as NSString).standardizingPath
+
+                  guard stdPath.hasPrefix(stdRoot) else {
+                      sendHTTP(connection: connection, status: 403, body: Data())
                       return
                   }
 
-                  let mimeType = Self.mimeType(for: resolvedPath)
-                  let headers = """
-                  HTTP/1.1 200 OK\r\n                  Content-Type: \(mimeType)\r\n                  Content-Length: \(fileData.count)\r\n                  Cross-Origin-Opener-Policy: same-origin\r\n                  Cross-Origin-Embedder-Policy: require-corp\r\n                  Access-Control-Allow-Origin: *\r\n                  Connection: close\r\n\r\n
-                  """
-
-                  guard let headerData = headers.data(using: .utf8) else {
-                      sendError(connection, status: 500)
+                  guard FileManager.default.fileExists(atPath: stdPath),
+                        let data = FileManager.default.contents(atPath: stdPath) else {
+                      print("[SERVER] 404: \(path)")
+                      sendHTTP(connection: connection, status: 404, body: Data())
                       return
                   }
 
-                  print("✅ HTTP 200: \(path) (\(fileData.count) bytes, \(mimeType))")
+                  let ext = (stdPath as NSString).pathExtension.lowercased()
+                  let mime = mimeFor(ext: ext)
+
+                  print("[SERVER] 200 \(path) (\(data.count) bytes)")
+
+                  // Build HTTP response using regular strings (\r\n = actual CRLF)
+                  var header = "HTTP/1.1 200 OK\r\n"
+                  header += "Content-Type: " + mime + "\r\n"
+                  header += "Content-Length: " + String(data.count) + "\r\n"
+                  header += "Cross-Origin-Opener-Policy: same-origin\r\n"
+                  header += "Cross-Origin-Embedder-Policy: require-corp\r\n"
+                  header += "Access-Control-Allow-Origin: *\r\n"
+                  header += "Connection: close\r\n"
+                  header += "\r\n"
+
+                  guard let headerData = header.data(using: .utf8) else {
+                      connection.cancel()
+                      return
+                  }
 
                   connection.send(content: headerData, completion: .contentProcessed { _ in
-                      connection.send(content: fileData, completion: .contentProcessed { _ in
+                      connection.send(content: data, completion: .contentProcessed { _ in
                           connection.cancel()
                       })
                   })
               }
 
-              private func sendError(_ connection: NWConnection, status: Int) {
-                  let message = status == 404 ? "Not Found" : (status == 403 ? "Forbidden" : "Internal Server Error")
-                  let response = "HTTP/1.1 \(status) \(message)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                  guard let data = response.data(using: .utf8) else {
-                      connection.cancel()
-                      return
+              private func sendHTTP(connection: NWConnection, status: Int, body: Data) {
+                  var header = "HTTP/1.1 " + String(status) + " "
+                  header += (status == 404 ? "Not Found" : (status == 403 ? "Forbidden" : "Error"))
+                  header += "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+                  if let data = header.data(using: .utf8) {
+                      connection.send(content: data, completion: .contentProcessed { _ in
+                          connection.cancel()
+                      })
                   }
-                  connection.send(content: data, completion: .contentProcessed { _ in
-                      connection.cancel()
-                  })
               }
 
-              private static func mimeType(for path: String) -> String {
-                  let ext = (path as NSString).pathExtension.lowercased()
+              private func mimeFor(ext: String) -> String {
                   switch ext {
                   case "html", "htm": return "text/html; charset=utf-8"
                   case "js", "mjs": return "application/javascript; charset=utf-8"
@@ -283,13 +300,31 @@ jobs:
           }
 
           // ═══════════════════════════════════════════════════════
-          // Console Logger
+          // JS Console Bridge
           // ═══════════════════════════════════════════════════════
-          class GodotLogger: NSObject, WKScriptMessageHandler {
-              func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-                  if let body = message.body as? String {
-                      print("🌐 [Godot] \(body)")
+          final class JSBridge: NSObject, WKScriptMessageHandler {
+              func userContentController(_ ucc: WKUserContentController, didReceive msg: WKScriptMessage) {
+                  if let body = msg.body as? String {
+                      print("[GODOT] \(body)")
                   }
+              }
+          }
+
+          // ═══════════════════════════════════════════════════════
+          // Navigation Delegate for debugging
+          // ═══════════════════════════════════════════════════════
+          final class NavDebug: NSObject, WKNavigationDelegate {
+              func webView(_ wv: WKWebView, didFinish nav: WKNavigation!) {
+                  print("[WEBVIEW] didFinish")
+                  wv.evaluateJavaScript("document.title", completionHandler: { r, _ in
+                      print("[WEBVIEW] Title: \(r ?? "nil")")
+                  })
+              }
+              func webView(_ wv: WKWebView, didFail nav: WKNavigation!, withError err: Error) {
+                  print("[WEBVIEW] didFail: \(err)")
+              }
+              func webView(_ wv: WKWebView, didFailProvisionalNavigation nav: WKNavigation!, withError err: Error) {
+                  print("[WEBVIEW] provisionalFail: \(err)")
               }
           }
 
@@ -297,69 +332,78 @@ jobs:
           struct GodotWebEditorApp: App {
               var body: some Scene {
                   WindowGroup {
-                      GodotEditorView()
+                      EditorView()
                           .edgesIgnoringSafeArea(.all)
                   }
               }
           }
 
-          struct GodotEditorView: UIViewRepresentable {
+          struct EditorView: UIViewRepresentable {
               func makeUIView(context: Context) -> WKWebView {
-                  let config = WKWebViewConfiguration()
-                  config.preferences.javaScriptEnabled = true
+                  let cfg = WKWebViewConfiguration()
+                  cfg.preferences.javaScriptEnabled = true
 
                   if #available(iOS 15.0, *) {
-                      let prefs = WKWebpagePreferences()
-                      prefs.allowsContentJavaScript = true
-                      config.defaultWebpagePreferences = prefs
+                      let p = WKWebpagePreferences()
+                      p.allowsContentJavaScript = true
+                      cfg.defaultWebpagePreferences = p
                   }
 
-                  // Console logger
-                  let logger = GodotLogger()
-                  config.userContentController.add(logger, name: "godotLog")
+                  // Console bridge
+                  let bridge = JSBridge()
+                  cfg.userContentController.add(bridge, name: "iosLog")
 
                   // Inject console capture
-                  let consoleScript = """
-                  (function() {
-                      const origLog = console.log, origErr = console.error, origWarn = console.warn;
-                      function send(lvl, args) {
-                          try { window.webkit.messageHandlers.godotLog.postMessage(`[${lvl}] ` + args.map(String).join(' ')); } catch(e) {}
-                      }
-                      console.log = function(...a) { send('LOG', a); origLog.apply(console, a); };
-                      console.error = function(...a) { send('ERROR', a); origErr.apply(console, a); };
-                      console.warn = function(...a) { send('WARN', a); origWarn.apply(console, a); };
-                      window.onerror = function(m,u,l,c,err) { send('FATAL', [`${m} at ${u}:${l}:${c}`]); return false; };
-                      window.onunhandledrejection = function(e) { send('REJECT', [`Unhandled: ${e.reason}`]); };
-                      console.log("Godot iOS: JS injected OK");
-                      console.log("crossOriginIsolated: " + window.crossOriginIsolated);
-                      console.log("SharedArrayBuffer: " + (typeof SharedArrayBuffer !== 'undefined' ? 'YES' : 'NO'));
+                  let js = """
+                  (function(){
+                      var ol=console.log, oe=console.error, ow=console.warn;
+                      function send(l,a){try{window.webkit.messageHandlers.iosLog.postMessage('['+l+'] '+Array.from(a).map(String).join(' '));}catch(e){}}
+                      console.log=function(){send('LOG',arguments);ol.apply(console,arguments);};
+                      console.error=function(){send('ERR',arguments);oe.apply(console,arguments);};
+                      console.warn=function(){send('WRN',arguments);ow.apply(console,arguments);};
+                      window.onerror=function(m,u,l,c,err){send('FATAL',[m,'at',u+':'+l+':'+c]);return false;};
+                      window.onunhandledrejection=function(e){send('REJ',['Unhandled:',e.reason]);};
+                      console.log('GODOT-iOS: JS bridge loaded');
+                      console.log('crossOriginIsolated:',window.crossOriginIsolated);
+                      console.log('SharedArrayBuffer:',typeof SharedArrayBuffer!=='undefined'?'YES':'NO');
                   })();
                   """
-                  config.userContentController.addUserScript(
-                      WKUserScript(source: consoleScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+                  cfg.userContentController.addUserScript(
+                      WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false)
                   )
 
-                  let webView = WKWebView(frame: .zero, configuration: config)
-                  webView.scrollView.bounces = false
-                  webView.backgroundColor = .black
-                  webView.isOpaque = true
-                  webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                  let wv = WKWebView(frame: .zero, configuration: cfg)
+                  wv.scrollView.bounces = false
+                  wv.backgroundColor = .black
+                  wv.isOpaque = true
+                  wv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+
+                  if #available(iOS 16.4, *) {
+                      wv.isInspectable = true
+                  }
+
+                  let nav = NavDebug()
+                  wv.navigationDelegate = nav
+                  context.coordinator.nav = nav
 
                   // Start HTTP server
                   let godotPath = Bundle.main.bundlePath + "/godot_editor"
-                  let server = TinyHTTPServer(port: 8080, basePath: godotPath)
-                  server.start()
+                  let server = LocalHTTPServer(rootPath: godotPath)
 
-                  // Keep server alive
-                  context.coordinator.server = server
+                  if server.start() {
+                      context.coordinator.server = server
+                      print("[APP] Server started, loading editor...")
+                      usleep(300000) // 0.3s warmup
 
-                  // Load from localhost
-                  if let url = URL(string: "http://127.0.0.1:8080/index.html") {
-                      print("🚀 Loading Godot from: \(url)")
-                      webView.load(URLRequest(url: url))
+                      if let url = URL(string: "http://127.0.0.1:8765/index.html") {
+                          wv.load(URLRequest(url: url))
+                      }
+                  } else {
+                      print("[APP] Server failed!")
+                      wv.loadHTMLString("<html><body style=\"background:#000;color:#f00;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;\"><div style=\"text-align:center\"><h1>Server Error</h1><p>Could not start HTTP server</p></div></body></html>", baseURL: nil)
                   }
 
-                  return webView
+                  return wv
               }
 
               func updateUIView(_ uiView: WKWebView, context: Context) {}
@@ -369,7 +413,8 @@ jobs:
               }
 
               class Coordinator: NSObject {
-                  var server: TinyHTTPServer?
+                  var server: LocalHTTPServer?
+                  var nav: NavDebug?
               }
           }
           SWIFTEOF
@@ -434,7 +479,7 @@ jobs:
                                           <color key="textColor" red="0.93725490570000003" green="0.93725490570000003" blue="0.95686274770000002" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                                           <nil key="highlightedColor"/>
                                       </label>
-                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • Local HTTP Server • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
+                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • Local Server • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
                                           <rect key="frame" x="0.0" y="314.66666666666669" width="393" height="21"/>
                                           <fontDescription key="fontDescription" type="system" pointSize="15"/>
                                           <color key="textColor" red="0.5803921569" green="0.5960784314" blue="0.6392156863" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
@@ -568,7 +613,7 @@ jobs:
           cp -R "$APP_PATH" Payload/
           rm -rf Payload/GodotWebEditor.app/_CodeSignature 2>/dev/null || true
 
-          VERSION="${{ github.event.inputs.godot_version || '4.6' }}"
+          VERSION="${{ github.event.inputs.godot_version || '4.3' }}"
           IPA_NAME="GodotWebEditor_v${VERSION}_unsigned.ipa"
 
           zip -qr "$IPA_NAME" Payload
@@ -595,8 +640,7 @@ jobs:
           echo "╠══════════════════════════════════════════════════════╣"
           echo "║  📁 File: $IPA_NAME                                  ║"
           echo "║  📱 Install: AltStore / Sideloadly / Scarlet         ║"
-          echo "║  🔧 Fix: Local HTTP Server (localhost:8080)          ║"
-          echo "║  ✅ Supports: Web Workers + WASM + SharedArrayBuffer ║"
+          echo "║  🔧 Debug: Safari → Develop → Your iPhone            ║"
           echo "╚══════════════════════════════════════════════════════╝"
         env:
           IPA_NAME: ${{ env.IPA_NAME }}
