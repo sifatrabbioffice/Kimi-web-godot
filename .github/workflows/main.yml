@@ -20,21 +20,18 @@ jobs:
   build-ipa:
     runs-on: macos-latest
     steps:
-      - name: 1Checkout Repo
+      - name: 1️⃣ Checkout Repo
         uses: actions/checkout@v4
 
-      - name: 2Setup Xcode
+      - name: 2️⃣ Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
 
-      - name: 3Install xcodegen
+      - name: 3️⃣ Install xcodegen
         run: brew install xcodegen
 
-      # ═══════════════════════════════════════════════════════
-      # STEP 4: Download Godot Web Editor
-      # ═══════════════════════════════════════════════════════
-      - name: 4Download Godot Web Editor
+      - name: 4️⃣ Download Godot Web Editor
         run: |
           set -ex
           VERSION="${{ github.event.inputs.godot_version || '4.3' }}"
@@ -95,10 +92,7 @@ jobs:
           ls -la
           cd ..
 
-      # ═══════════════════════════════════════════════════════
-      # STEP 5: Create iOS App with ZOOM + BIG UI
-      # ═══════════════════════════════════════════════════════
-      - name: 5Create iOS App
+      - name: 5️⃣ Create iOS App
         run: |
           set -ex
 
@@ -110,16 +104,12 @@ jobs:
           cp -R godot_editor/* GodotWebEditor/Resources/godot_editor/
           echo "✅ Copied $(find GodotWebEditor/Resources/godot_editor -type f | wc -l) files"
 
-          # ── SwiftUI App ──
           cat > GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
           import SwiftUI
           import WebKit
           import Network
           import Foundation
 
-          // ═══════════════════════════════════════════════════════
-          // HTTP/1.1 Server
-          // ═══════════════════════════════════════════════════════
           final class LocalHTTPServer: NSObject {
               private var listener: NWListener?
               private let root: String
@@ -238,14 +228,22 @@ jobs:
 
                   print("[SERVER] 200 \(path) (\(data.count) bytes)")
 
-                  var header = "HTTP/1.1 200 OK\r\n"
-                  header += "Content-Type: " + mime + "\r\n"
-                  header += "Content-Length: " + String(data.count) + "\r\n"
-                  header += "Cross-Origin-Opener-Policy: same-origin\r\n"
-                  header += "Cross-Origin-Embedder-Policy: require-corp\r\n"
-                  header += "Access-Control-Allow-Origin: *\r\n"
-                  header += "Connection: close\r\n"
-                  header += "\r\n"
+                  var header = "HTTP/1.1 200 OK
+"
+                  header += "Content-Type: " + mime + "
+"
+                  header += "Content-Length: " + String(data.count) + "
+"
+                  header += "Cross-Origin-Opener-Policy: same-origin
+"
+                  header += "Cross-Origin-Embedder-Policy: require-corp
+"
+                  header += "Access-Control-Allow-Origin: *
+"
+                  header += "Connection: close
+"
+                  header += "
+"
 
                   guard let headerData = header.data(using: .utf8) else {
                       connection.cancel()
@@ -262,7 +260,11 @@ jobs:
               private func sendHTTP(connection: NWConnection, status: Int, body: Data) {
                   var header = "HTTP/1.1 " + String(status) + " "
                   header += (status == 404 ? "Not Found" : (status == 403 ? "Forbidden" : "Error"))
-                  header += "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                  header += "
+Content-Length: 0
+Connection: close
+
+"
 
                   if let data = header.data(using: .utf8) {
                       connection.send(content: data, completion: .contentProcessed { _ in
@@ -295,9 +297,6 @@ jobs:
               }
           }
 
-          // ═══════════════════════════════════════════════════════
-          // JS Console Bridge
-          // ═══════════════════════════════════════════════════════
           final class JSBridge: NSObject, WKScriptMessageHandler {
               func userContentController(_ ucc: WKUserContentController, didReceive msg: WKScriptMessage) {
                   if let body = msg.body as? String {
@@ -306,9 +305,6 @@ jobs:
               }
           }
 
-          // ═══════════════════════════════════════════════════════
-          // Navigation Delegate
-          // ═══════════════════════════════════════════════════════
           final class NavDebug: NSObject, WKNavigationDelegate {
               func webView(_ wv: WKWebView, didFinish nav: WKNavigation!) {
                   print("[WEBVIEW] didFinish")
@@ -334,58 +330,135 @@ jobs:
           struct EditorView: UIViewRepresentable {
               func makeUIView(context: Context) -> WKWebView {
                   let cfg = WKWebViewConfiguration()
-                  cfg.preferences.javaScriptEnabled = true
 
+                  // ═══════════════════════════════════════════════════════
+                  // MAX PERFORMANCE CONFIG for Godot Web Editor
+                  // ═══════════════════════════════════════════════════════
+                  cfg.preferences.javaScriptEnabled = true
+                  cfg.preferences.javaScriptCanOpenWindowsAutomatically = true
+                  cfg.allowsInlineMediaPlayback = true
+                  cfg.mediaTypesRequiringUserActionForPlayback = []
+                  cfg.processPool = WKProcessPool()
+
+                  // WebGL / GPU settings
                   if #available(iOS 15.0, *) {
                       let p = WKWebpagePreferences()
                       p.allowsContentJavaScript = true
                       cfg.defaultWebpagePreferences = p
                   }
 
+                  // Allow file access (for local storage)
+                  cfg.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+
                   // Console bridge
                   let bridge = JSBridge()
                   cfg.userContentController.add(bridge, name: "iosLog")
 
                   // ═══════════════════════════════════════════════════════
-                  // INJECT: Mobile Zoom + Big UI for iPhone
+                  // CRITICAL FIX: Touch-to-Mouse + Canvas Fix + Mobile UI
+                  // This fixes: project select → Edit → scene editor not loading
                   // ═══════════════════════════════════════════════════════
-                  let mobileZoomScript = """
+                  let mobileFixScript = """
                   (function(){
-                      // 1. Viewport meta for pinch-to-zoom like mobile web
+                      // 1. Viewport for mobile with editor scaling
                       var meta = document.createElement('meta');
                       meta.name = 'viewport';
-                      meta.content = 'width=device-width, initial-scale=1.5, minimum-scale=0.5, maximum-scale=4.0, user-scalable=yes, viewport-fit=cover';
+                      meta.content = 'width=device-width, initial-scale=1.2, minimum-scale=0.5, maximum-scale=4.0, user-scalable=yes, viewport-fit=cover';
                       document.head.appendChild(meta);
 
-                      // 2. CSS: Make everything bigger for phone screens
+                      // 2. Touch to Mouse Event Mapping (critical for Godot editor)
+                      // Godot expects mouse events, not touch events
+                      function sendMouseEvent(type, touch, target) {
+                          var mouseEvent = new MouseEvent(type, {
+                              bubbles: true,
+                              cancelable: true,
+                              view: window,
+                              detail: 1,
+                              screenX: touch.screenX,
+                              screenY: touch.screenY,
+                              clientX: touch.clientX,
+                              clientY: touch.clientY,
+                              ctrlKey: false,
+                              altKey: false,
+                              shiftKey: false,
+                              metaKey: false,
+                              button: 0,
+                              relatedTarget: target
+                          });
+                          target.dispatchEvent(mouseEvent);
+                      }
+
+                      document.addEventListener('touchstart', function(e) {
+                          var touch = e.touches[0];
+                          var target = document.elementFromPoint(touch.clientX, touch.clientY) || e.target;
+                          sendMouseEvent('mousedown', touch, target);
+                          sendMouseEvent('mouseenter', touch, target);
+                      }, {passive: false});
+
+                      document.addEventListener('touchmove', function(e) {
+                          var touch = e.touches[0];
+                          var target = document.elementFromPoint(touch.clientX, touch.clientY) || e.target;
+                          sendMouseEvent('mousemove', touch, target);
+                      }, {passive: false});
+
+                      document.addEventListener('touchend', function(e) {
+                          var touch = e.changedTouches[0];
+                          var target = document.elementFromPoint(touch.clientX, touch.clientY) || e.target;
+                          sendMouseEvent('mouseup', touch, target);
+                          sendMouseEvent('click', touch, target);
+                      }, {passive: false});
+
+                      // 3. Canvas resize fix for editor viewport
+                      function fixCanvas() {
+                          var canvases = document.querySelectorAll('canvas');
+                          canvases.forEach(function(canvas) {
+                              if (!canvas.dataset.fixed) {
+                                  canvas.dataset.fixed = 'true';
+                                  canvas.style.touchAction = 'none';
+                                  canvas.style.width = '100%';
+                                  canvas.style.height = '100%';
+                                  canvas.style.maxWidth = '100vw';
+                                  canvas.style.maxHeight = '100vh';
+
+                                  // Ensure WebGL context is preserved
+                                  var gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+                                  if (gl) {
+                                      console.log('WebGL context found on canvas');
+                                  }
+                              }
+                          });
+                      }
+
+                      // Run canvas fix periodically (Godot creates canvas dynamically)
+                      setInterval(fixCanvas, 1000);
+
+                      // 4. CSS: Make UI bigger for phone
                       var style = document.createElement('style');
                       style.textContent = `
-                          /* Scale up the entire page for phone screens */
                           body {
-                              zoom: 1.3 !important;
-                              -webkit-text-size-adjust: 130% !important;
+                              zoom: 1.2 !important;
+                              -webkit-text-size-adjust: 120% !important;
+                              overflow: hidden !important;
                           }
-
-                          /* Ensure canvas is crisp when zoomed */
                           canvas {
-                              image-rendering: auto !important;
+                              display: block !important;
+                              width: 100vw !important;
+                              height: 100vh !important;
                           }
-
-                          /* Bigger touch targets */
-                          button, input, select, textarea, a {
+                          /* Godot editor specific UI scaling */
+                          .godot-editor, #editor, .editor-container {
+                              width: 100vw !important;
+                              height: 100vh !important;
+                          }
+                          button, input, select, textarea, a, [role="button"] {
                               min-height: 44px !important;
                               min-width: 44px !important;
                               font-size: 16px !important;
                           }
-
-                          /* Allow pinch zoom on canvas area */
-                          #canvas, #game-canvas, canvas {
-                              touch-action: pan-x pan-y pinch-zoom !important;
-                          }
                       `;
                       document.head.appendChild(style);
 
-                      // 3. Console bridge
+                      // 5. Console bridge
                       var ol=console.log, oe=console.error, ow=console.warn;
                       function send(l,a){
                           try{
@@ -398,21 +471,18 @@ jobs:
                       window.onerror=function(m,u,l,c,err){send('FATAL',[m,'at',u+':'+l+':'+c]);return false;};
                       window.onunhandledrejection=function(e){send('REJ',['Unhandled:',e.reason]);};
 
-                      console.log('GODOT-iOS: Mobile zoom + big UI injected');
-                      console.log('Viewport scale: 1.5x, Zoom: 0.5x-4.0x');
+                      console.log('GODOT-iOS: Mobile fix injected (touch→mouse + canvas fix)');
                       console.log('crossOriginIsolated:',window.crossOriginIsolated);
                       console.log('SharedArrayBuffer:',typeof SharedArrayBuffer!=='undefined'?'YES':'NO');
                   })();
                   """
                   cfg.userContentController.addUserScript(
-                      WKUserScript(source: mobileZoomScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+                      WKUserScript(source: mobileFixScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
                   )
 
                   let wv = WKWebView(frame: .zero, configuration: cfg)
 
-                  // ═══════════════════════════════════════════════════════
-                  // ZOOM SETTINGS: Like mobile Safari
-                  // ═══════════════════════════════════════════════════════
+                  // Zoom settings
                   wv.scrollView.bounces = true
                   wv.scrollView.alwaysBounceVertical = true
                   wv.scrollView.alwaysBounceHorizontal = true
@@ -467,7 +537,6 @@ jobs:
           }
           SWIFTEOF
 
-          # ── Info.plist ──
           cat > GodotWebEditor/Info.plist << 'PLISTEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -504,7 +573,6 @@ jobs:
           </plist>
           PLISTEOF
 
-          # ── LaunchScreen.storyboard ──
           cat > GodotWebEditor/Resources/Base.lproj/LaunchScreen.storyboard << 'LAUNCHEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="21701" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="01J-lp-oVM">
@@ -527,7 +595,7 @@ jobs:
                                           <color key="textColor" red="0.93725490570000003" green="0.93725490570000003" blue="0.95686274770000002" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                                           <nil key="highlightedColor"/>
                                       </label>
-                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • Pinch Zoom • Big UI • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
+                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • Touch→Mouse • Scene Editor • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
                                           <rect key="frame" x="0.0" y="314.66666666666669" width="393" height="21"/>
                                           <fontDescription key="fontDescription" type="system" pointSize="15"/>
                                           <color key="textColor" red="0.5803921569" green="0.5960784314" blue="0.6392156863" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
@@ -551,11 +619,9 @@ jobs:
           </document>
           LAUNCHEOF
 
-          # ── Assets ──
           echo '{"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/Contents.json
           echo '{"images":[{"filename":"appicon.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json
 
-          # ── App Icon ──
           python3 << 'PYEOF'
           import struct, zlib
           w, h = 1024, 1024
@@ -571,7 +637,6 @@ jobs:
           print("✅ Icon created")
           PYEOF
 
-          # ── xcodegen project ──
           cat > GodotWebEditor/project.yml << 'YAMLEOF'
           name: GodotWebEditor
           settings:
@@ -603,10 +668,7 @@ jobs:
           xcodegen generate
           cd ..
 
-      # ═══════════════════════════════════════════════════════
-      # STEP 6: Build Unsigned .app
-      # ═══════════════════════════════════════════════════════
-      - name: 6Build Unsigned .app
+      - name: 6️⃣ Build Unsigned .app
         run: |
           set -ex
           cd GodotWebEditor
@@ -615,10 +677,7 @@ jobs:
 
           cd ..
 
-      # ═══════════════════════════════════════════════════════
-      # STEP 7: Verify .app Bundle
-      # ═══════════════════════════════════════════════════════
-      - name: 7Verify .app Bundle
+      - name: 7️⃣ Verify .app Bundle
         run: |
           set -ex
 
@@ -648,10 +707,7 @@ jobs:
           echo "📊 godot_editor size: $(du -sh "$APP_PATH/godot_editor" | cut -f1)"
           echo "📊 Total .app size: $(du -sh "$APP_PATH" | cut -f1)"
 
-      # ═══════════════════════════════════════════════════════
-      # STEP 8: Package IPA
-      # ═══════════════════════════════════════════════════════
-      - name: 8Package IPA
+      - name: 8️⃣ Package IPA
         run: |
           set -ex
 
@@ -670,10 +726,7 @@ jobs:
           echo "IPA_NAME=$IPA_NAME" >> "$GITHUB_ENV"
           echo "✅ Created: $IPA_NAME ($(du -sh "$IPA_NAME" | cut -f1))"
 
-      # ═══════════════════════════════════════════════════════
-      # STEP 9: Upload
-      # ═══════════════════════════════════════════════════════
-      - name: 9Upload IPA
+      - name: 9️⃣ Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: godot-web-editor-ipa
@@ -688,7 +741,7 @@ jobs:
           echo "╠══════════════════════════════════════════════════════╣"
           echo "║  📁 File: $IPA_NAME                                  ║"
           echo "║  📱 Install: AltStore / Sideloadly / Scarlet         ║"
-          echo "║  🔧 Features: Pinch Zoom + Big UI + Offline          ║"
+          echo "║  🔧 Fix: Touch→Mouse + Canvas + Scene Editor       ║"
           echo "╚══════════════════════════════════════════════════════╝"
         env:
           IPA_NAME: ${{ env.IPA_NAME }}
