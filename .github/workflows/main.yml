@@ -10,7 +10,7 @@ on:
       godot_version:
         description: 'Godot Version'
         required: true
-        default: '4.3'
+        default: '4.4'
       godot_status:
         description: 'Release Status'
         required: true
