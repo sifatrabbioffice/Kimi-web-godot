@@ -20,18 +20,18 @@ jobs:
   build-ipa:
     runs-on: macos-latest
     steps:
-      - name: 1Checkout Repo
+      - name: 1️⃣ Checkout Repo
         uses: actions/checkout@v4
 
-      - name: 2Setup Xcode
+      - name: 2️⃣ Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
 
-      - name: 3Install xcodegen
+      - name: 3️⃣ Install xcodegen
         run: brew install xcodegen
 
-      - name: 4Download Godot Web Editor
+      - name: 4️⃣ Download Godot Web Editor
         run: |
           set -ex
           VERSION="${{ github.event.inputs.godot_version || '4.3' }}"
@@ -92,7 +92,7 @@ jobs:
           ls -la
           cd ..
 
-      - name: 5Create iOS App
+      - name: 5️⃣ Create iOS App
         run: |
           set -ex
 
@@ -228,14 +228,22 @@ jobs:
 
                   print("[SERVER] 200 \(path) (\(data.count) bytes)")
 
-                  var header = "HTTP/1.1 200 OK\r\n"
-                  header += "Content-Type: " + mime + "\r\n"
-                  header += "Content-Length: " + String(data.count) + "\r\n"
-                  header += "Cross-Origin-Opener-Policy: same-origin\r\n"
-                  header += "Cross-Origin-Embedder-Policy: require-corp\r\n"
-                  header += "Access-Control-Allow-Origin: *\r\n"
-                  header += "Connection: close\r\n"
-                  header += "\r\n"
+                  var header = "HTTP/1.1 200 OK
+"
+                  header += "Content-Type: " + mime + "
+"
+                  header += "Content-Length: " + String(data.count) + "
+"
+                  header += "Cross-Origin-Opener-Policy: same-origin
+"
+                  header += "Cross-Origin-Embedder-Policy: require-corp
+"
+                  header += "Access-Control-Allow-Origin: *
+"
+                  header += "Connection: close
+"
+                  header += "
+"
 
                   guard let headerData = header.data(using: .utf8) else {
                       connection.cancel()
@@ -252,7 +260,11 @@ jobs:
               private func sendHTTP(connection: NWConnection, status: Int, body: Data) {
                   var header = "HTTP/1.1 " + String(status) + " "
                   header += (status == 404 ? "Not Found" : (status == 403 ? "Forbidden" : "Error"))
-                  header += "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                  header += "
+Content-Length: 0
+Connection: close
+
+"
 
                   if let data = header.data(using: .utf8) {
                       connection.send(content: data, completion: .contentProcessed { _ in
@@ -320,7 +332,7 @@ jobs:
                   let cfg = WKWebViewConfiguration()
 
                   // ═══════════════════════════════════════════════════════
-                  // MAX PERFORMANCE CONFIG for Godot Web Editor
+                  // CRITICAL: WebGL + Canvas settings for Godot rendering
                   // ═══════════════════════════════════════════════════════
                   cfg.preferences.javaScriptEnabled = true
                   cfg.preferences.javaScriptCanOpenWindowsAutomatically = true
@@ -334,106 +346,27 @@ jobs:
                       cfg.defaultWebpagePreferences = p
                   }
 
+                  // Allow file access for IndexedDB
                   cfg.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
 
+                  // Console bridge
                   let bridge = JSBridge()
                   cfg.userContentController.add(bridge, name: "iosLog")
 
                   // ═══════════════════════════════════════════════════════
-                  // TOUCH → MOUSE + CANVAS FIX + MOBILE UI
+                  // MINIMAL INJECTION: Only viewport + console + canvas fix
+                  // NO touch-to-mouse mapping (Godot handles touch natively)
+                  // NO aggressive CSS (breaks WebGL rendering)
                   // ═══════════════════════════════════════════════════════
-                  let mobileFixScript = """
+                  let fixScript = """
                   (function(){
+                      // 1. Viewport: allow zoom but start at normal scale
                       var meta = document.createElement('meta');
                       meta.name = 'viewport';
-                      meta.content = 'width=device-width, initial-scale=1.2, minimum-scale=0.5, maximum-scale=4.0, user-scalable=yes, viewport-fit=cover';
+                      meta.content = 'width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=3.0, user-scalable=yes';
                       document.head.appendChild(meta);
 
-                      function sendMouseEvent(type, touch, target) {
-                          var mouseEvent = new MouseEvent(type, {
-                              bubbles: true,
-                              cancelable: true,
-                              view: window,
-                              detail: 1,
-                              screenX: touch.screenX,
-                              screenY: touch.screenY,
-                              clientX: touch.clientX,
-                              clientY: touch.clientY,
-                              ctrlKey: false,
-                              altKey: false,
-                              shiftKey: false,
-                              metaKey: false,
-                              button: 0,
-                              relatedTarget: target
-                          });
-                          target.dispatchEvent(mouseEvent);
-                      }
-
-                      document.addEventListener('touchstart', function(e) {
-                          var touch = e.touches[0];
-                          var target = document.elementFromPoint(touch.clientX, touch.clientY) || e.target;
-                          sendMouseEvent('mousedown', touch, target);
-                          sendMouseEvent('mouseenter', touch, target);
-                      }, {passive: false});
-
-                      document.addEventListener('touchmove', function(e) {
-                          var touch = e.touches[0];
-                          var target = document.elementFromPoint(touch.clientX, touch.clientY) || e.target;
-                          sendMouseEvent('mousemove', touch, target);
-                      }, {passive: false});
-
-                      document.addEventListener('touchend', function(e) {
-                          var touch = e.changedTouches[0];
-                          var target = document.elementFromPoint(touch.clientX, touch.clientY) || e.target;
-                          sendMouseEvent('mouseup', touch, target);
-                          sendMouseEvent('click', touch, target);
-                      }, {passive: false});
-
-                      function fixCanvas() {
-                          var canvases = document.querySelectorAll('canvas');
-                          canvases.forEach(function(canvas) {
-                              if (!canvas.dataset.fixed) {
-                                  canvas.dataset.fixed = 'true';
-                                  canvas.style.touchAction = 'none';
-                                  canvas.style.width = '100%';
-                                  canvas.style.height = '100%';
-                                  canvas.style.maxWidth = '100vw';
-                                  canvas.style.maxHeight = '100vh';
-
-                                  var gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
-                                  if (gl) {
-                                      console.log('WebGL context found on canvas');
-                                  }
-                              }
-                          });
-                      }
-
-                      setInterval(fixCanvas, 1000);
-
-                      var style = document.createElement('style');
-                      style.textContent = `
-                          body {
-                              zoom: 1.2 !important;
-                              -webkit-text-size-adjust: 120% !important;
-                              overflow: hidden !important;
-                          }
-                          canvas {
-                              display: block !important;
-                              width: 100vw !important;
-                              height: 100vh !important;
-                          }
-                          .godot-editor, #editor, .editor-container {
-                              width: 100vw !important;
-                              height: 100vh !important;
-                          }
-                          button, input, select, textarea, a, [role="button"] {
-                              min-height: 44px !important;
-                              min-width: 44px !important;
-                              font-size: 16px !important;
-                          }
-                      `;
-                      document.head.appendChild(style);
-
+                      // 2. Console bridge
                       var ol=console.log, oe=console.error, ow=console.warn;
                       function send(l,a){
                           try{
@@ -446,23 +379,43 @@ jobs:
                       window.onerror=function(m,u,l,c,err){send('FATAL',[m,'at',u+':'+l+':'+c]);return false;};
                       window.onunhandledrejection=function(e){send('REJ',['Unhandled:',e.reason]);};
 
-                      console.log('GODOT-iOS: Mobile fix injected (touch→mouse + canvas fix)');
-                      console.log('crossOriginIsolated:',window.crossOriginIsolated);
-                      console.log('SharedArrayBuffer:',typeof SharedArrayBuffer!=='undefined'?'YES':'NO');
+                      // 3. Monitor canvas creation and log WebGL status
+                      var origGetContext = HTMLCanvasElement.prototype.getContext;
+                      HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+                          var ctx = origGetContext.call(this, type, attrs);
+                          if (type === 'webgl2' || type === 'webgl') {
+                              console.log('Canvas WebGL context created:', type);
+                          }
+                          return ctx;
+                      };
+
+                      // 4. Fix: Ensure canvas stays visible when Godot resizes it
+                      // Godot sets canvas.style.width/height via JS. We must NOT override.
+                      // Only fix: ensure the canvas container has proper size
+                      var style = document.createElement('style');
+                      style.textContent = `
+                          html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+                          #canvas, canvas { display: block; }
+                      `;
+                      document.head.appendChild(style);
+
+                      console.log('GODOT-iOS: Minimal fix loaded. Godot handles touch natively.');
+                      console.log('crossOriginIsolated:', window.crossOriginIsolated);
                   })();
                   """
                   cfg.userContentController.addUserScript(
-                      WKUserScript(source: mobileFixScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+                      WKUserScript(source: fixScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
                   )
 
                   let wv = WKWebView(frame: .zero, configuration: cfg)
 
+                  // Zoom settings
                   wv.scrollView.bounces = true
-                  wv.scrollView.alwaysBounceVertical = true
-                  wv.scrollView.alwaysBounceHorizontal = true
+                  wv.scrollView.alwaysBounceVertical = false
+                  wv.scrollView.alwaysBounceHorizontal = false
                   wv.scrollView.bouncesZoom = true
                   wv.scrollView.minimumZoomScale = 0.5
-                  wv.scrollView.maximumZoomScale = 4.0
+                  wv.scrollView.maximumZoomScale = 3.0
                   wv.scrollView.isScrollEnabled = true
                   wv.scrollView.pinchGestureRecognizer?.isEnabled = true
 
@@ -478,6 +431,7 @@ jobs:
                   wv.navigationDelegate = nav
                   context.coordinator.nav = nav
 
+                  // Start HTTP server
                   let godotPath = Bundle.main.bundlePath + "/godot_editor"
                   let server = LocalHTTPServer(rootPath: godotPath)
 
@@ -568,7 +522,7 @@ jobs:
                                           <color key="textColor" red="0.93725490570000003" green="0.93725490570000003" blue="0.95686274770000002" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                                           <nil key="highlightedColor"/>
                                       </label>
-                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • Touch→Mouse • Scene Editor • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
+                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • Native Touch • WebGL • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
                                           <rect key="frame" x="0.0" y="314.66666666666669" width="393" height="21"/>
                                           <fontDescription key="fontDescription" type="system" pointSize="15"/>
                                           <color key="textColor" red="0.5803921569" green="0.5960784314" blue="0.6392156863" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
@@ -641,7 +595,7 @@ jobs:
           xcodegen generate
           cd ..
 
-      - name: 6Build Unsigned .app
+      - name: 6️⃣ Build Unsigned .app
         run: |
           set -ex
           cd GodotWebEditor
@@ -650,7 +604,7 @@ jobs:
 
           cd ..
 
-      - name: 7Verify .app Bundle
+      - name: 7️⃣ Verify .app Bundle
         run: |
           set -ex
 
@@ -680,7 +634,7 @@ jobs:
           echo "📊 godot_editor size: $(du -sh "$APP_PATH/godot_editor" | cut -f1)"
           echo "📊 Total .app size: $(du -sh "$APP_PATH" | cut -f1)"
 
-      - name: 8Package IPA
+      - name: 8️⃣ Package IPA
         run: |
           set -ex
 
@@ -699,7 +653,7 @@ jobs:
           echo "IPA_NAME=$IPA_NAME" >> "$GITHUB_ENV"
           echo "✅ Created: $IPA_NAME ($(du -sh "$IPA_NAME" | cut -f1))"
 
-      - name: 9Upload IPA
+      - name: 9️⃣ Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: godot-web-editor-ipa
@@ -714,7 +668,7 @@ jobs:
           echo "╠══════════════════════════════════════════════════════╣"
           echo "║  📁 File: $IPA_NAME                                  ║"
           echo "║  📱 Install: AltStore / Sideloadly / Scarlet         ║"
-          echo "║  🔧 Fix: Touch→Mouse + Canvas + Scene Editor       ║"
+          echo "║  🔧 Fix: Removed broken CSS, let Godot handle touch  ║"
           echo "╚══════════════════════════════════════════════════════╝"
         env:
           IPA_NAME: ${{ env.IPA_NAME }}
