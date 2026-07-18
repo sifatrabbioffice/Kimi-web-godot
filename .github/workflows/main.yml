@@ -31,6 +31,9 @@ jobs:
       - name: 3Install xcodegen
         run: brew install xcodegen
 
+      # ============================================================
+      # 📥 Download & Extract — RENAME বন্ধ, শুধু main HTML detect
+      # ============================================================
       - name: 4Download Godot Web Editor
         run: |
           set -ex
@@ -68,33 +71,47 @@ jobs:
           unzip -q web_editor.zip || { echo "❌ Bad ZIP"; exit 1; }
           rm -f web_editor.zip
 
+          # Subdirectory সরানোর কাজ আগের মতো
           SUBDIR=$(find . -maxdepth 1 -type d | grep -v '^\.$' | head -n 1)
           if [ -n "$SUBDIR" ] && [ -d "$SUBDIR" ]; then
             mv "$SUBDIR"/* . 2>/dev/null || true
             rmdir "$SUBDIR" 2>/dev/null || true
           fi
 
+          # ❌ RENAME ব্লক পুরোপুরি মুছে ফেলা
+          # এখন মূল HTML ফাইল খুঁজে তার নাম save করব
+          DEFAULT_HTML=""
           for f in godot.editor.html godot.web.editor.html godot.html; do
-            if [ -f "$f" ] && [ "$f" != "index.html" ]; then
-              mv "$f" index.html
-              echo "📝 Renamed $f → index.html"
+            if [ -f "$f" ]; then
+              DEFAULT_HTML="$f"
+              echo "🔍 Found main HTML: $f"
               break
             fi
           done
 
-          if [ ! -f index.html ]; then
-            echo "❌ No index.html! Files:"
+          if [ -z "$DEFAULT_HTML" ]; then
+            echo "❌ No known main HTML file found! Contents:"
             ls -la
             exit 1
           fi
 
-          echo "✅ Ready: $(du -sh . | cut -f1), $(find . -type f | wc -l) files"
+          # Environment variable হিসেবে future steps-এ পাঠাই
+          echo "DEFAULT_HTML_FILE=$DEFAULT_HTML" >> "$GITHUB_ENV"
+          echo "✅ Main HTML = $DEFAULT_HTML"
+          echo "📂 Ready: $(du -sh . | cut -f1), $(find . -type f | wc -l) files"
           ls -la
           cd ..
 
+      # ============================================================
+      # 🔧 iOS App create — DEFAULT_HTML_FILE inject করে সার্ভার ঠিক করব
+      # ============================================================
       - name: 5Create iOS App
         run: |
           set -ex
+
+          # আগের step থেকে পাওয়া main HTML filename
+          DEFAULT_HTML="${DEFAULT_HTML_FILE}"
+          echo "✅ Using default HTML: $DEFAULT_HTML"
 
           mkdir -p GodotWebEditor/Sources
           mkdir -p GodotWebEditor/Resources/godot_editor
@@ -104,6 +121,7 @@ jobs:
           cp -R godot_editor/* GodotWebEditor/Resources/godot_editor/
           echo "✅ Copied $(find GodotWebEditor/Resources/godot_editor -type f | wc -l) files"
 
+          # Swift কোডে DEFAULT_HTML inject করার জন্য placeholder ব্যবহার করব
           cat > GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
           import SwiftUI
           import WebKit
@@ -113,10 +131,12 @@ jobs:
           final class LocalHTTPServer: NSObject {
               private var listener: NWListener?
               private let root: String
+              private let defaultHtml: String
               private var ready = false
 
-              init(rootPath: String) {
+              init(rootPath: String, defaultHtmlFile: String) {
                   self.root = rootPath
+                  self.defaultHtml = defaultHtmlFile
               }
 
               func start() -> Bool {
@@ -205,7 +225,14 @@ jobs:
                   }
 
                   let rawPath = String(parts[1])
-                  let path = rawPath == "/" ? "/index.html" : rawPath
+                  // ⭐ root হলে defaultHtml file serve করব
+                  let path: String
+                  if rawPath == "/" {
+                      path = "/" + self.defaultHtml
+                      print("[SERVER] Default file: \(path)")
+                  } else {
+                      path = rawPath
+                  }
 
                   let filePath = (root + path).replacingOccurrences(of: "..", with: "")
                   let stdPath = (filePath as NSString).standardizingPath
@@ -319,9 +346,6 @@ jobs:
               func makeUIView(context: Context) -> WKWebView {
                   let cfg = WKWebViewConfiguration()
 
-                  // ═══════════════════════════════════════════════════════
-                  // CRITICAL: WebGL + Canvas settings for Godot rendering
-                  // ═══════════════════════════════════════════════════════
                   cfg.preferences.javaScriptEnabled = true
                   cfg.preferences.javaScriptCanOpenWindowsAutomatically = true
                   cfg.allowsInlineMediaPlayback = true
@@ -334,27 +358,18 @@ jobs:
                       cfg.defaultWebpagePreferences = p
                   }
 
-                  // Allow file access for IndexedDB
                   cfg.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
 
-                  // Console bridge
                   let bridge = JSBridge()
                   cfg.userContentController.add(bridge, name: "iosLog")
 
-                  // ═══════════════════════════════════════════════════════
-                  // MINIMAL INJECTION: Only viewport + console + canvas fix
-                  // NO touch-to-mouse mapping (Godot handles touch natively)
-                  // NO aggressive CSS (breaks WebGL rendering)
-                  // ═══════════════════════════════════════════════════════
                   let fixScript = """
                   (function(){
-                      // 1. Viewport: allow zoom but start at normal scale
                       var meta = document.createElement('meta');
                       meta.name = 'viewport';
                       meta.content = 'width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=3.0, user-scalable=yes';
                       document.head.appendChild(meta);
 
-                      // 2. Console bridge
                       var ol=console.log, oe=console.error, ow=console.warn;
                       function send(l,a){
                           try{
@@ -367,7 +382,6 @@ jobs:
                       window.onerror=function(m,u,l,c,err){send('FATAL',[m,'at',u+':'+l+':'+c]);return false;};
                       window.onunhandledrejection=function(e){send('REJ',['Unhandled:',e.reason]);};
 
-                      // 3. Monitor canvas creation and log WebGL status
                       var origGetContext = HTMLCanvasElement.prototype.getContext;
                       HTMLCanvasElement.prototype.getContext = function(type, attrs) {
                           var ctx = origGetContext.call(this, type, attrs);
@@ -377,9 +391,6 @@ jobs:
                           return ctx;
                       };
 
-                      // 4. Fix: Ensure canvas stays visible when Godot resizes it
-                      // Godot sets canvas.style.width/height via JS. We must NOT override.
-                      // Only fix: ensure the canvas container has proper size
                       var style = document.createElement('style');
                       style.textContent = `
                           html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
@@ -397,7 +408,6 @@ jobs:
 
                   let wv = WKWebView(frame: .zero, configuration: cfg)
 
-                  // Zoom settings
                   wv.scrollView.bounces = true
                   wv.scrollView.alwaysBounceVertical = false
                   wv.scrollView.alwaysBounceHorizontal = false
@@ -419,9 +429,10 @@ jobs:
                   wv.navigationDelegate = nav
                   context.coordinator.nav = nav
 
-                  // Start HTTP server
                   let godotPath = Bundle.main.bundlePath + "/godot_editor"
-                  let server = LocalHTTPServer(rootPath: godotPath)
+                  // ⭐ ডিফল্ট HTML ফাইলের নাম এখানে pass করছি (build‑time constant হিসেবে embed)
+                  let defaultHtmlFile = "%%DEFAULT_HTML_FILE%%"
+                  let server = LocalHTTPServer(rootPath: godotPath, defaultHtmlFile: defaultHtmlFile)
 
                   if server.start() {
                       context.coordinator.server = server
@@ -452,6 +463,10 @@ jobs:
           }
           SWIFTEOF
 
+          # ⭐ placeholder এর জায়গায় আসল ডিফল্ট HTML নাম বসিয়ে ফাইল ওভাররাইট
+          sed -i '' "s|%%DEFAULT_HTML_FILE%%|${DEFAULT_HTML}|g" GodotWebEditor/Sources/App.swift
+
+          # Info.plist, LaunchScreen, Assets ইত্যাদি আগের মতোই
           cat > GodotWebEditor/Info.plist << 'PLISTEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -583,6 +598,7 @@ jobs:
           xcodegen generate
           cd ..
 
+      # Step 6–8 আগের মতোই
       - name: 6Build Unsigned .app
         run: |
           set -ex
@@ -656,7 +672,7 @@ jobs:
           echo "╠══════════════════════════════════════════════════════╣"
           echo "║  📁 File: $IPA_NAME                                  ║"
           echo "║  📱 Install: AltStore / Sideloadly / Scarlet         ║"
-          echo "║  🔧 Fix: Removed broken CSS, let Godot handle touch  ║"
+          echo "║  🔧 Fix: Removed renaming, kept original filenames   ║"
           echo "╚══════════════════════════════════════════════════════╝"
         env:
           IPA_NAME: ${{ env.IPA_NAME }}
