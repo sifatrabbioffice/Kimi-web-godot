@@ -20,18 +20,18 @@ jobs:
   build-ipa:
     runs-on: macos-latest
     steps:
-      - name: 1️⃣ Checkout Repo
+      - name: 1Checkout Repo
         uses: actions/checkout@v4
 
-      - name: 2️⃣ Setup Xcode
+      - name: 2Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
 
-      - name: 3️⃣ Install xcodegen
+      - name: 3Install xcodegen
         run: brew install xcodegen
 
-      - name: 4️⃣ Download Godot Web Editor
+      - name: 4Download Godot Web Editor
         run: |
           set -ex
           VERSION="${{ github.event.inputs.godot_version || '4.3' }}"
@@ -92,7 +92,7 @@ jobs:
           ls -la
           cd ..
 
-      - name: 5️⃣ Create iOS App
+      - name: 5Create iOS App
         run: |
           set -ex
 
@@ -228,22 +228,14 @@ jobs:
 
                   print("[SERVER] 200 \(path) (\(data.count) bytes)")
 
-                  var header = "HTTP/1.1 200 OK
-"
-                  header += "Content-Type: " + mime + "
-"
-                  header += "Content-Length: " + String(data.count) + "
-"
-                  header += "Cross-Origin-Opener-Policy: same-origin
-"
-                  header += "Cross-Origin-Embedder-Policy: require-corp
-"
-                  header += "Access-Control-Allow-Origin: *
-"
-                  header += "Connection: close
-"
-                  header += "
-"
+                  var header = "HTTP/1.1 200 OK\r\n"
+                  header += "Content-Type: " + mime + "\r\n"
+                  header += "Content-Length: " + String(data.count) + "\r\n"
+                  header += "Cross-Origin-Opener-Policy: same-origin\r\n"
+                  header += "Cross-Origin-Embedder-Policy: require-corp\r\n"
+                  header += "Access-Control-Allow-Origin: *\r\n"
+                  header += "Connection: close\r\n"
+                  header += "\r\n"
 
                   guard let headerData = header.data(using: .utf8) else {
                       connection.cancel()
@@ -260,11 +252,7 @@ jobs:
               private func sendHTTP(connection: NWConnection, status: Int, body: Data) {
                   var header = "HTTP/1.1 " + String(status) + " "
                   header += (status == 404 ? "Not Found" : (status == 403 ? "Forbidden" : "Error"))
-                  header += "
-Content-Length: 0
-Connection: close
-
-"
+                  header += "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 
                   if let data = header.data(using: .utf8) {
                       connection.send(content: data, completion: .contentProcessed { _ in
@@ -340,34 +328,27 @@ Connection: close
                   cfg.mediaTypesRequiringUserActionForPlayback = []
                   cfg.processPool = WKProcessPool()
 
-                  // WebGL / GPU settings
                   if #available(iOS 15.0, *) {
                       let p = WKWebpagePreferences()
                       p.allowsContentJavaScript = true
                       cfg.defaultWebpagePreferences = p
                   }
 
-                  // Allow file access (for local storage)
                   cfg.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
 
-                  // Console bridge
                   let bridge = JSBridge()
                   cfg.userContentController.add(bridge, name: "iosLog")
 
                   // ═══════════════════════════════════════════════════════
-                  // CRITICAL FIX: Touch-to-Mouse + Canvas Fix + Mobile UI
-                  // This fixes: project select → Edit → scene editor not loading
+                  // TOUCH → MOUSE + CANVAS FIX + MOBILE UI
                   // ═══════════════════════════════════════════════════════
                   let mobileFixScript = """
                   (function(){
-                      // 1. Viewport for mobile with editor scaling
                       var meta = document.createElement('meta');
                       meta.name = 'viewport';
                       meta.content = 'width=device-width, initial-scale=1.2, minimum-scale=0.5, maximum-scale=4.0, user-scalable=yes, viewport-fit=cover';
                       document.head.appendChild(meta);
 
-                      // 2. Touch to Mouse Event Mapping (critical for Godot editor)
-                      // Godot expects mouse events, not touch events
                       function sendMouseEvent(type, touch, target) {
                           var mouseEvent = new MouseEvent(type, {
                               bubbles: true,
@@ -408,7 +389,6 @@ Connection: close
                           sendMouseEvent('click', touch, target);
                       }, {passive: false});
 
-                      // 3. Canvas resize fix for editor viewport
                       function fixCanvas() {
                           var canvases = document.querySelectorAll('canvas');
                           canvases.forEach(function(canvas) {
@@ -420,7 +400,6 @@ Connection: close
                                   canvas.style.maxWidth = '100vw';
                                   canvas.style.maxHeight = '100vh';
 
-                                  // Ensure WebGL context is preserved
                                   var gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
                                   if (gl) {
                                       console.log('WebGL context found on canvas');
@@ -429,10 +408,8 @@ Connection: close
                           });
                       }
 
-                      // Run canvas fix periodically (Godot creates canvas dynamically)
                       setInterval(fixCanvas, 1000);
 
-                      // 4. CSS: Make UI bigger for phone
                       var style = document.createElement('style');
                       style.textContent = `
                           body {
@@ -445,7 +422,6 @@ Connection: close
                               width: 100vw !important;
                               height: 100vh !important;
                           }
-                          /* Godot editor specific UI scaling */
                           .godot-editor, #editor, .editor-container {
                               width: 100vw !important;
                               height: 100vh !important;
@@ -458,7 +434,6 @@ Connection: close
                       `;
                       document.head.appendChild(style);
 
-                      // 5. Console bridge
                       var ol=console.log, oe=console.error, ow=console.warn;
                       function send(l,a){
                           try{
@@ -482,7 +457,6 @@ Connection: close
 
                   let wv = WKWebView(frame: .zero, configuration: cfg)
 
-                  // Zoom settings
                   wv.scrollView.bounces = true
                   wv.scrollView.alwaysBounceVertical = true
                   wv.scrollView.alwaysBounceHorizontal = true
@@ -504,7 +478,6 @@ Connection: close
                   wv.navigationDelegate = nav
                   context.coordinator.nav = nav
 
-                  // Start HTTP server
                   let godotPath = Bundle.main.bundlePath + "/godot_editor"
                   let server = LocalHTTPServer(rootPath: godotPath)
 
@@ -668,7 +641,7 @@ Connection: close
           xcodegen generate
           cd ..
 
-      - name: 6️⃣ Build Unsigned .app
+      - name: 6Build Unsigned .app
         run: |
           set -ex
           cd GodotWebEditor
@@ -677,7 +650,7 @@ Connection: close
 
           cd ..
 
-      - name: 7️⃣ Verify .app Bundle
+      - name: 7Verify .app Bundle
         run: |
           set -ex
 
@@ -707,7 +680,7 @@ Connection: close
           echo "📊 godot_editor size: $(du -sh "$APP_PATH/godot_editor" | cut -f1)"
           echo "📊 Total .app size: $(du -sh "$APP_PATH" | cut -f1)"
 
-      - name: 8️⃣ Package IPA
+      - name: 8Package IPA
         run: |
           set -ex
 
@@ -726,7 +699,7 @@ Connection: close
           echo "IPA_NAME=$IPA_NAME" >> "$GITHUB_ENV"
           echo "✅ Created: $IPA_NAME ($(du -sh "$IPA_NAME" | cut -f1))"
 
-      - name: 9️⃣ Upload IPA
+      - name: 9Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: godot-web-editor-ipa
