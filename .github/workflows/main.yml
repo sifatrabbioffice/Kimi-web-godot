@@ -20,21 +20,21 @@ jobs:
   build-ipa:
     runs-on: macos-latest
     steps:
-      - name: 1Checkout Repo
+      - name: 📥 Checkout Repo
         uses: actions/checkout@v4
 
-      - name: 2Setup Xcode
+      - name: 🛠️ Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
 
-      - name: 3Install xcodegen
+      - name: 📦 Install xcodegen
         run: brew install xcodegen
 
       # ═══════════════════════════════════════════════════════
       # STEP 4: Download Godot Web Editor + ALL data files
       # ═══════════════════════════════════════════════════════
-      - name: 4Download Godot Web Editor
+      - name: ⬇️ Download Godot Web Editor
         run: |
           set -ex
           VERSION="${{ github.event.inputs.godot_version || '4.3' }}"
@@ -47,7 +47,7 @@ jobs:
           mkdir -p godot_editor
           cd godot_editor
 
-          # Try multiple sources
+          # Try multiple sources for the web editor zip
           SOURCES=(
             "https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
             "https://downloads.tuxfamily.org/godotengine/${VERSION}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
@@ -56,94 +56,117 @@ jobs:
 
           for URL in "${SOURCES[@]}"; do
             echo "Trying: $URL"
-            if curl -fsL --max-time 120 -o web_editor.zip "$URL"; then
-              echo "✅ Downloaded"
+            if curl -fsL --max-time 180 -o web_editor.zip "$URL"; then
+              echo "✅ Downloaded from: $URL"
               break
             fi
-            echo "❌ Failed"
+            echo "❌ Failed: $URL"
           done
 
           if [ ! -f web_editor.zip ] || [ ! -s web_editor.zip ]; then
-            echo "❌ All sources failed"
+            echo "❌ All download sources failed!"
             exit 1
           fi
 
-          echo "📦 ZIP: $(ls -lh web_editor.zip | awk '{print $5}')"
-          unzip -q web_editor.zip || { echo "❌ Bad ZIP"; exit 1; }
+          echo "📦 ZIP size: $(ls -lh web_editor.zip | awk '{print $5}')"
+
+          # Extract the zip
+          unzip -q web_editor.zip || { echo "❌ Failed to extract ZIP"; exit 1; }
           rm -f web_editor.zip
 
-          # Flatten subdirectory if present
+          # Flatten subdirectory if present (some zips have a nested folder)
           SUBDIR=$(find . -maxdepth 1 -type d | grep -v '^\.$' | head -n 1)
           if [ -n "$SUBDIR" ] && [ -d "$SUBDIR" ]; then
+            echo "📁 Flattening subdirectory: $SUBDIR"
             mv "$SUBDIR"/* . 2>/dev/null || true
             rmdir "$SUBDIR" 2>/dev/null || true
           fi
 
-          # Rename main HTML
-          for f in godot.editor.html godot.web.editor.html godot.html; do
-            if [ -f "$f" ] && [ "$f" != "index.html" ]; then
-              mv "$f" index.html
-              echo "📝 Renamed $f → index.html"
-              break
-            fi
-          done
-
-          if [ ! -f index.html ]; then
-            echo "❌ No index.html! Files:"
-            ls -la
-            exit 1
-          fi
-
           # ═══════════════════════════════════════════════════════
-          # CRITICAL: Check for .data file (compiled editor assets)
-          # This file is HUGE (~100-200MB) and ESSENTIAL for rendering
+          # CRITICAL: Verify all essential files are present
+          # Godot 4.x web editor includes .data file INSIDE the zip
           # ═══════════════════════════════════════════════════════
           echo ""
           echo "🔍 Checking for critical files..."
 
-          DATA_FILES=(
+          # List all files first
+          echo "📂 All files in directory:"
+          ls -lah
+          echo ""
+
+          # Check for HTML entry point (keep original name!)
+          HTML_FILE=""
+          for f in godot.editor.html godot.web.editor.html godot.html index.html; do
+            if [ -f "$f" ]; then
+              HTML_FILE="$f"
+              echo "✅ HTML entry point: $f"
+              break
+            fi
+          done
+
+          if [ -z "$HTML_FILE" ]; then
+            echo "❌ No HTML entry point found!"
+            exit 1
+          fi
+
+          # Check critical asset files
+          CRITICAL_FILES=(
             "godot.editor.data"
             "godot.editor.wasm"
             "godot.editor.js"
-            "godot.editor.worker.js"
-            "godot.editor.audio.worklet.js"
           )
 
-          for f in "${DATA_FILES[@]}"; do
+          MISSING=0
+          for f in "${CRITICAL_FILES[@]}"; do
             if [ -f "$f" ]; then
               size=$(ls -lh "$f" | awk '{print $5}')
               echo "  ✅ $f ($size)"
             else
               echo "  ❌ MISSING: $f"
+              MISSING=$((MISSING + 1))
             fi
           done
 
-          # If .data file is missing, try to find any .data file
-          if [ ! -f "godot.editor.data" ]; then
-            echo "⚠️ godot.editor.data not found! Searching for alternatives..."
-            find . -name "*.data" -type f
+          # Also check for optional but important files
+          OPTIONAL_FILES=(
+            "godot.editor.worker.js"
+            "godot.editor.audio.worklet.js"
+          )
 
-            # Try to download individual .data file
-            echo "🔄 Trying to download .data file separately..."
-            curl -fsL --max-time 120 -o godot.editor.data               "https://downloads.tuxfamily.org/godotengine/${VERSION}/Godot_v${VERSION}-${STATUS}_web_editor.data" || true
-
-            if [ ! -f "godot.editor.data" ]; then
-              echo "❌ CRITICAL: .data file missing! Editor will show black screen."
-              echo "   The .data file contains all compiled editor assets."
-              echo "   Without it, the editor cannot render anything."
+          for f in "${OPTIONAL_FILES[@]}"; do
+            if [ -f "$f" ]; then
+              size=$(ls -lh "$f" | awk '{print $5}')
+              echo "  ✅ $f ($size)"
+            else
+              echo "  ⚠️  Optional missing: $f"
             fi
+          done
+
+          if [ $MISSING -gt 0 ]; then
+            echo ""
+            echo "❌ CRITICAL: $MISSING essential file(s) missing!"
+            echo "   The .data file contains all compiled editor assets."
+            echo "   Without it, the editor will show a black screen."
+            echo ""
+            echo "   This usually means:"
+            echo "   1. The downloaded zip was corrupted"
+            echo "   2. This Godot version doesn't include web editor .data in zip"
+            echo "   3. The zip structure is different than expected"
+            echo ""
+            echo "   Try a different Godot version (4.3+ recommended)"
+            exit 1
           fi
 
           echo ""
-          echo "✅ Ready: $(du -sh . | cut -f1), $(find . -type f | wc -l) files"
-          echo "📂 File listing:"
-          ls -lh
+          echo "✅ All critical files present!"
+          echo "📊 Total size: $(du -sh . | cut -f1)"
+          echo "📊 File count: $(find . -type f | wc -l)"
           cd ..
 
       # ═══════════════════════════════════════════════════════
       # STEP 5: Create iOS App
       # ═══════════════════════════════════════════════════════
-      - name: 5Create iOS App
+      - name: 📱 Create iOS App
         run: |
           set -ex
 
@@ -157,9 +180,10 @@ jobs:
 
           # Verify .data file is in Resources
           if [ ! -f "GodotWebEditor/Resources/godot_editor/godot.editor.data" ]; then
-            echo "⚠️ WARNING: godot.editor.data not in Resources!"
-            echo "   Files in Resources:"
+            echo "❌ CRITICAL: godot.editor.data not found in Resources!"
+            echo "📂 Files in Resources/godot_editor:"
             ls -la GodotWebEditor/Resources/godot_editor/
+            exit 1
           else
             echo "✅ godot.editor.data present: $(ls -lh GodotWebEditor/Resources/godot_editor/godot.editor.data | awk '{print $5}')"
           fi
@@ -265,7 +289,7 @@ jobs:
                   }
 
                   let rawPath = String(parts[1])
-                  let path = rawPath == "/" ? "/index.html" : rawPath
+                  let path = rawPath == "/" ? "/" + self.entryHTML : rawPath
 
                   let filePath = (root + path).replacingOccurrences(of: "..", with: "")
                   let stdPath = (filePath as NSString).standardizingPath
@@ -342,6 +366,18 @@ jobs:
                   case "txt": return "text/plain"
                   default: return "application/octet-stream"
                   }
+              }
+
+              // Auto-detect the HTML entry point from available files
+              private var entryHTML: String {
+                  let candidates = ["godot.editor.html", "godot.web.editor.html", "godot.html", "index.html"]
+                  for candidate in candidates {
+                      let path = (root + "/" + candidate)
+                      if FileManager.default.fileExists(atPath: path) {
+                          return candidate
+                      }
+                  }
+                  return "index.html"
               }
           }
 
@@ -425,13 +461,10 @@ jobs:
                       };
 
                       var style = document.createElement('style');
-                      style.textContent = `
-                          html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
-                          canvas { display: block; }
-                      `;
+                      style.textContent = 'html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; } canvas { display: block; }';
                       document.head.appendChild(style);
 
-                      console.log('GODOT-iOS: Minimal fix loaded');
+                      console.log('GODOT-iOS: Fix script loaded');
                       console.log('crossOriginIsolated:', window.crossOriginIsolated);
                   })();
                   """
@@ -470,7 +503,7 @@ jobs:
                       print("[APP] Server started, loading editor...")
                       usleep(300000)
 
-                      if let url = URL(string: "http://127.0.0.1:8765/index.html") {
+                      if let url = URL(string: "http://127.0.0.1:8765/") {
                           wv.load(URLRequest(url: url))
                       }
                   } else {
@@ -625,16 +658,31 @@ jobs:
           xcodegen generate
           cd ..
 
-      - name: 6Build Unsigned .app
+      - name: 🔨 Build Unsigned .app
         run: |
           set -ex
           cd GodotWebEditor
 
-          xcodebuild               -project GodotWebEditor.xcodeproj               -scheme GodotWebEditor               -configuration Release               -destination 'generic/platform=iOS'               -derivedDataPath ../DerivedData               CODE_SIGN_IDENTITY=""               CODE_SIGNING_REQUIRED=NO               CODE_SIGNING_ALLOWED=NO               DEVELOPMENT_TEAM=""               PROVISIONING_PROFILE_SPECIFIER=""               ONLY_ACTIVE_ARCH=NO               ARCHS="arm64"               VALID_ARCHS="arm64"               ENABLE_BITCODE=NO               clean build
+          xcodebuild \
+            -project GodotWebEditor.xcodeproj \
+            -scheme GodotWebEditor \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath ../DerivedData \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            ONLY_ACTIVE_ARCH=NO \
+            ARCHS="arm64" \
+            VALID_ARCHS="arm64" \
+            ENABLE_BITCODE=NO \
+            clean build
 
           cd ..
 
-      - name: 7Verify .app Bundle
+      - name: 🔍 Verify .app Bundle
         run: |
           set -ex
 
@@ -664,7 +712,15 @@ jobs:
           echo "📊 godot_editor size: $(du -sh "$APP_PATH/godot_editor" | cut -f1)"
           echo "📊 Total .app size: $(du -sh "$APP_PATH" | cut -f1)"
 
-      - name: 8Package IPA
+          # Final verification: check .data file is in the app bundle
+          if [ ! -f "$APP_PATH/godot_editor/godot.editor.data" ]; then
+            echo "❌ CRITICAL: godot.editor.data missing from final .app bundle!"
+            exit 1
+          else
+            echo "✅ godot.editor.data confirmed in .app bundle"
+          fi
+
+      - name: 📦 Package IPA
         run: |
           set -ex
 
@@ -683,7 +739,7 @@ jobs:
           echo "IPA_NAME=$IPA_NAME" >> "$GITHUB_ENV"
           echo "✅ Created: $IPA_NAME ($(du -sh "$IPA_NAME" | cut -f1))"
 
-      - name: 9Upload IPA
+      - name: ⬆️ Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: godot-web-editor-ipa
@@ -696,9 +752,8 @@ jobs:
           echo "╔══════════════════════════════════════════════════════╗"
           echo "║  🎉 IPA BUILD COMPLETE                               ║"
           echo "╠══════════════════════════════════════════════════════╣"
-          echo "║  📁 File: $IPA_NAME                                  ║"
+          echo "║  📁 File: ${{ env.IPA_NAME }}                                  ║"
           echo "║  📱 Install: AltStore / Sideloadly / Scarlet         ║"
-          echo "║  🔧 Fix: .data file check + separate download        ║"
+          echo "║  🔧 Original filenames preserved                     ║"
+          echo "║  🔧 .data file verified in bundle                    ║"
           echo "╚══════════════════════════════════════════════════════╝"
-        env:
-          IPA_NAME: ${{ env.IPA_NAME }}
