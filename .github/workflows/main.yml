@@ -27,29 +27,27 @@ jobs:
       - name: 📦 Install xcodegen
         run: brew install xcodegen
 
-      - name: 📱 Create iOS App
+      # ---- ডিরেক্টরি তৈরি ----
+      - name: 📁 Create Directories
         run: |
-          set -ex
-
           mkdir -p GodotWebEditor/Sources
           mkdir -p GodotWebEditor/Resources/Base.lproj
           mkdir -p GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset
 
+      # ---- App.swift (Part 1) ----
+      - name: 📝 Write App.swift (Part 1)
+        run: |
           cat > GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
           import SwiftUI
           import WebKit
           import Network
           import Foundation
 
-          // ═══════════════════════════════════════════════════════════════
           // CONFIG
-          // ═══════════════════════════════════════════════════════════════
           let BASE_URL = "${{ github.event.inputs.base_url || 'https://editor.godotengine.org/' }}"
           let SERVER_PORT: UInt16 = 8765
 
-          // ═══════════════════════════════════════════════════════════════
           // APP ENTRY
-          // ═══════════════════════════════════════════════════════════════
           @main
           struct GodotWebEditorApp: App {
               var body: some Scene {
@@ -60,9 +58,7 @@ jobs:
               }
           }
 
-          // ═══════════════════════════════════════════════════════════════
           // CONTENT VIEW
-          // ═══════════════════════════════════════════════════════════════
           struct ContentView: View {
               @StateObject private var serverManager = ServerManager()
 
@@ -81,9 +77,7 @@ jobs:
               }
           }
 
-          // ═══════════════════════════════════════════════════════════════
           // SERVER SETUP / DOWNLOAD VIEW
-          // ═══════════════════════════════════════════════════════════════
           struct ServerSetupView: View {
               @ObservedObject var manager: ServerManager
 
@@ -157,10 +151,14 @@ jobs:
                   }
               }
           }
+          SWIFTEOF
 
-          // ═══════════════════════════════════════════════════════════════
+      # ---- App.swift (Part 2) ----
+      - name: 📝 Write App.swift (Part 2)
+        run: |
+          cat >> GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
+
           // SERVER MANAGER
-          // ═══════════════════════════════════════════════════════════════
           @MainActor
           class ServerManager: ObservableObject {
               @Published var isReady = false
@@ -234,9 +232,7 @@ jobs:
               }
           }
 
-          // ═══════════════════════════════════════════════════════════════
           // EDITOR WEBVIEW
-          // ═══════════════════════════════════════════════════════════════
           struct EditorWebView: UIViewRepresentable {
               let serverManager: ServerManager
 
@@ -330,9 +326,7 @@ jobs:
               }
           }
 
-          // ═══════════════════════════════════════════════════════════════
           // JS BRIDGE
-          // ═══════════════════════════════════════════════════════════════
           final class JSBridge: NSObject, WKScriptMessageHandler {
               func userContentController(_ ucc: WKUserContentController, didReceive msg: WKScriptMessage) {
                   if let body = msg.body as? String {
@@ -341,9 +335,7 @@ jobs:
               }
           }
 
-          // ═══════════════════════════════════════════════════════════════
           // LOCAL HTTP SERVER (with on-demand download)
-          // ═══════════════════════════════════════════════════════════════
           final class LocalHTTPServer: NSObject {
               private var listener: NWListener?
               private let root: String
@@ -408,7 +400,6 @@ jobs:
               }
 
               // MARK: - Connection Handling
-
               private func handleConnection(_ connection: NWConnection) {
                   connection.start(queue: .global())
                   readHTTP(connection: connection, buffer: Data())
@@ -472,7 +463,6 @@ jobs:
                   // Check if file exists locally
                   if FileManager.default.fileExists(atPath: stdPath),
                      let data = FileManager.default.contents(atPath: stdPath) {
-                      // Serve from cache
                       print("[SERVER] 200 CACHE \(path) (\(data.count) bytes)")
                       self.serveData(connection: connection, data: data, path: path)
                       return
@@ -482,15 +472,12 @@ jobs:
                   downloadQueue.async { [weak self] in
                       guard let self = self else { return }
 
-                      // Prevent duplicate downloads
                       if self.activeDownloads.contains(fileName) {
-                          // Wait for existing download
                           var attempts = 0
                           while self.activeDownloads.contains(fileName) && attempts < 100 {
                               usleep(100000)
                               attempts += 1
                           }
-                          // Try serving again
                           if let data = FileManager.default.contents(atPath: stdPath) {
                               self.serveData(connection: connection, data: data, path: path)
                               return
@@ -505,7 +492,6 @@ jobs:
                       }
 
                       let remoteURL = self.baseURL + (path.hasPrefix("/") ? String(path.dropFirst()) : path)
-
                       guard let url = URL(string: remoteURL) else {
                           self.activeDownloads.remove(fileName)
                           self.sendHTTP(connection: connection, status: 404, body: Data())
@@ -514,7 +500,6 @@ jobs:
 
                       let semaphore = DispatchSemaphore(value: 0)
                       var downloadedData: Data?
-
                       let task = URLSession.shared.dataTask(with: url) { data, response, error in
                           downloadedData = data
                           semaphore.signal()
@@ -532,7 +517,6 @@ jobs:
                           return
                       }
 
-                      // Save to cache
                       do {
                           let dir = (stdPath as NSString).deletingLastPathComponent
                           try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -619,12 +603,14 @@ jobs:
                           return candidate
                       }
                   }
-                  // If none cached, try downloading godot.editor.html first
                   return "godot.editor.html"
               }
           }
           SWIFTEOF
 
+      # ---- Info.plist ----
+      - name: 📝 Create Info.plist
+        run: |
           cat > GodotWebEditor/Info.plist << 'PLISTEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -661,6 +647,9 @@ jobs:
           </plist>
           PLISTEOF
 
+      # ---- LaunchScreen.storyboard ----
+      - name: 🎨 Create Launch Screen
+        run: |
           cat > GodotWebEditor/Resources/Base.lproj/LaunchScreen.storyboard << 'LAUNCHEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="21701" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="01J-lp-oVM">
@@ -707,9 +696,14 @@ jobs:
           </document>
           LAUNCHEOF
 
+      # ---- Assets catalog ----
+      - name: 🖼️ Setup App Icon Assets
+        run: |
           echo '{"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/Contents.json
           echo '{"images":[{"filename":"appicon.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json
 
+      - name: 🎨 Generate App Icon
+        run: |
           python3 << 'PYEOF'
           import struct, zlib
           w, h = 1024, 1024
@@ -725,6 +719,9 @@ jobs:
           print("✅ Icon created")
           PYEOF
 
+      # ---- project.yml ----
+      - name: 📄 Create project.yml
+        run: |
           cat > GodotWebEditor/project.yml << 'YAMLEOF'
           name: GodotWebEditor
           settings:
@@ -752,6 +749,9 @@ jobs:
                 path: Info.plist
           YAMLEOF
 
+      # ---- XcodeGen ----
+      - name: 🧬 Generate Xcode Project
+        run: |
           cd GodotWebEditor
           xcodegen generate
           cd ..
