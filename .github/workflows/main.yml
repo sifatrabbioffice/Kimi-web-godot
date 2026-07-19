@@ -84,7 +84,6 @@ jobs:
                           Image(systemName: "cube.transparent")
                               .font(.system(size: 70))
                               .foregroundColor(.blue)
-                              .symbolEffect(.pulse)
 
                           Text("Godot Web Editor")
                               .font(.largeTitle)
@@ -185,11 +184,9 @@ jobs:
                   // Persistent data store for caching
                   cfg.websiteDataStore = WKWebsiteDataStore.default()
 
-                  cfg.preferences.javaScriptEnabled = true
                   cfg.preferences.javaScriptCanOpenWindowsAutomatically = true
                   cfg.allowsInlineMediaPlayback = true
                   cfg.mediaTypesRequiringUserActionForPlayback = []
-                  cfg.processPool = WKProcessPool()
 
                   if #available(iOS 15.0, *) {
                       let p = WKWebpagePreferences()
