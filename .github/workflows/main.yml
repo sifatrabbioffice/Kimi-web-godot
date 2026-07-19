@@ -1,4 +1,4 @@
-name: 🎮 Godot Web Editor → Unsigned IPA
+name: 🎮 Godot Web Editor Online → Lightweight IPA
 
 on:
   push:
@@ -10,7 +10,7 @@ on:
       godot_version:
         description: 'Godot Version'
         required: true
-        default: '4.4'
+        default: '4.7'
       godot_status:
         description: 'Release Status'
         required: true
@@ -32,168 +32,414 @@ jobs:
         run: brew install xcodegen
 
       # ═══════════════════════════════════════════════════════
-      # STEP 4: Download Godot Web Editor + ALL data files
-      # ═══════════════════════════════════════════════════════
-      - name: ⬇️ Download Godot Web Editor
-        run: |
-          set -ex
-          VERSION="${{ github.event.inputs.godot_version || '4.4' }}"
-          STATUS="${{ github.event.inputs.godot_status || 'stable' }}"
-
-          echo "=========================================="
-          echo "📥 Downloading Godot ${VERSION}-${STATUS}"
-          echo "=========================================="
-
-          mkdir -p godot_editor
-          cd godot_editor
-
-          # Try multiple sources for the web editor zip
-          SOURCES=(
-            "https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
-            "https://downloads.tuxfamily.org/godotengine/${VERSION}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
-            "https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/web_editor.zip"
-          )
-
-          for URL in "${SOURCES[@]}"; do
-            echo "Trying: $URL"
-            if curl -fsL --max-time 180 -o web_editor.zip "$URL"; then
-              echo "✅ Downloaded from: $URL"
-              break
-            fi
-            echo "❌ Failed: $URL"
-          done
-
-          if [ ! -f web_editor.zip ] || [ ! -s web_editor.zip ]; then
-            echo "❌ All download sources failed!"
-            exit 1
-          fi
-
-          echo "📦 ZIP size: $(ls -lh web_editor.zip | awk '{print $5}')"
-
-          # Extract the zip
-          unzip -q web_editor.zip || { echo "❌ Failed to extract ZIP"; exit 1; }
-          rm -f web_editor.zip
-
-          # Flatten subdirectory if present (some zips have a nested folder)
-          SUBDIR=$(find . -maxdepth 1 -type d | grep -v '^\.$' | head -n 1)
-          if [ -n "$SUBDIR" ] && [ -d "$SUBDIR" ]; then
-            echo "📁 Flattening subdirectory: $SUBDIR"
-            mv "$SUBDIR"/* . 2>/dev/null || true
-            rmdir "$SUBDIR" 2>/dev/null || true
-          fi
-
-          # ═══════════════════════════════════════════════════════
-          # CRITICAL: Verify all essential files are present
-          # Godot 4.x web editor includes .data file INSIDE the zip
-          # ═══════════════════════════════════════════════════════
-          echo ""
-          echo "🔍 Checking for critical files..."
-
-          # List all files first
-          echo "📂 All files in directory:"
-          ls -lah
-          echo ""
-
-          # Check for HTML entry point (keep original name!)
-          HTML_FILE=""
-          for f in godot.editor.html godot.web.editor.html godot.html index.html; do
-            if [ -f "$f" ]; then
-              HTML_FILE="$f"
-              echo "✅ HTML entry point: $f"
-              break
-            fi
-          done
-
-          if [ -z "$HTML_FILE" ]; then
-            echo "❌ No HTML entry point found!"
-            exit 1
-          fi
-
-          # Check critical asset files
-          CRITICAL_FILES=(
-            "godot.editor.data"
-            "godot.editor.wasm"
-            "godot.editor.js"
-          )
-
-          MISSING=0
-          for f in "${CRITICAL_FILES[@]}"; do
-            if [ -f "$f" ]; then
-              size=$(ls -lh "$f" | awk '{print $5}')
-              echo "  ✅ $f ($size)"
-            else
-              echo "  ❌ MISSING: $f"
-              MISSING=$((MISSING + 1))
-            fi
-          done
-
-          # Also check for optional but important files
-          OPTIONAL_FILES=(
-            "godot.editor.worker.js"
-            "godot.editor.audio.worklet.js"
-          )
-
-          for f in "${OPTIONAL_FILES[@]}"; do
-            if [ -f "$f" ]; then
-              size=$(ls -lh "$f" | awk '{print $5}')
-              echo "  ✅ $f ($size)"
-            else
-              echo "  ⚠️  Optional missing: $f"
-            fi
-          done
-
-          if [ $MISSING -gt 0 ]; then
-            echo ""
-            echo "❌ CRITICAL: $MISSING essential file(s) missing!"
-            echo "   The .data file contains all compiled editor assets."
-            echo "   Without it, the editor will show a black screen."
-            echo ""
-            echo "   This usually means:"
-            echo "   1. The downloaded zip was corrupted"
-            echo "   2. This Godot version doesn't include web editor .data in zip"
-            echo "   3. The zip structure is different than expected"
-            echo ""
-            echo "   Try a different Godot version (4.3+ recommended)"
-            exit 1
-          fi
-
-          echo ""
-          echo "✅ All critical files present!"
-          echo "📊 Total size: $(du -sh . | cut -f1)"
-          echo "📊 File count: $(find . -type f | wc -l)"
-          cd ..
-
-      # ═══════════════════════════════════════════════════════
-      # STEP 5: Create iOS App
+      # STEP: Create Lightweight iOS App (Downloads Godot at Runtime)
       # ═══════════════════════════════════════════════════════
       - name: 📱 Create iOS App
         run: |
           set -ex
 
           mkdir -p GodotWebEditor/Sources
-          mkdir -p GodotWebEditor/Resources/godot_editor
           mkdir -p GodotWebEditor/Resources/Base.lproj
           mkdir -p GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset
-
-          cp -R godot_editor/* GodotWebEditor/Resources/godot_editor/
-          echo "✅ Copied $(find GodotWebEditor/Resources/godot_editor -type f | wc -l) files"
-
-          # Verify .data file is in Resources
-          if [ ! -f "GodotWebEditor/Resources/godot_editor/godot.editor.data" ]; then
-            echo "❌ CRITICAL: godot.editor.data not found in Resources!"
-            echo "📂 Files in Resources/godot_editor:"
-            ls -la GodotWebEditor/Resources/godot_editor/
-            exit 1
-          else
-            echo "✅ godot.editor.data present: $(ls -lh GodotWebEditor/Resources/godot_editor/godot.editor.data | awk '{print $5}')"
-          fi
 
           cat > GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
           import SwiftUI
           import WebKit
           import Network
           import Foundation
+          import ZIPFoundation
 
+          // MARK: - App Entry
+          @main
+          struct GodotWebEditorApp: App {
+              var body: some Scene {
+                  WindowGroup {
+                      ContentView()
+                          .edgesIgnoringSafeArea(.all)
+                  }
+              }
+          }
+
+          // MARK: - Main Content View
+          struct ContentView: View {
+              @StateObject private var downloadManager = DownloadManager()
+
+              var body: some View {
+                  Group {
+                      if downloadManager.isReady {
+                          EditorView()
+                              .edgesIgnoringSafeArea(.all)
+                      } else {
+                          DownloadView(manager: downloadManager)
+                      }
+                  }
+                  .onAppear {
+                      downloadManager.startIfNeeded()
+                  }
+              }
+          }
+
+          // MARK: - Download View
+          struct DownloadView: View {
+              @ObservedObject var manager: DownloadManager
+
+              var body: some View {
+                  ZStack {
+                      Color.black.ignoresSafeArea()
+
+                      VStack(spacing: 24) {
+                          Spacer()
+
+                          Image(systemName: "cube.transparent")
+                              .font(.system(size: 80))
+                              .foregroundColor(.blue)
+
+                          Text("Godot Web Editor")
+                              .font(.largeTitle)
+                              .fontWeight(.bold)
+                              .foregroundColor(.white)
+
+                          Text(manager.status)
+                              .font(.subheadline)
+                              .foregroundColor(.gray)
+                              .multilineTextAlignment(.center)
+                              .padding(.horizontal)
+
+                          if manager.error == nil {
+                              VStack(spacing: 8) {
+                                  ProgressView(value: manager.progress)
+                                      .progressViewStyle(LinearProgressViewStyle(tint: .blue))
+                                      .frame(width: 280)
+
+                                  Text("\(Int(manager.progress * 100))%")
+                                      .font(.caption)
+                                      .foregroundColor(.gray)
+                              }
+                          }
+
+                          if let error = manager.error {
+                              Text(error)
+                                  .font(.caption)
+                                  .foregroundColor(.red)
+                                  .multilineTextAlignment(.center)
+                                  .padding(.horizontal, 32)
+
+                              Button("Retry") {
+                                  manager.retry()
+                              }
+                              .padding(.horizontal, 32)
+                              .padding(.vertical, 12)
+                              .background(Color.blue)
+                              .foregroundColor(.white)
+                              .cornerRadius(10)
+                          }
+
+                          Spacer()
+
+                          Text("Version: \(manager.version)-\(manager.releaseStatus)")
+                              .font(.caption2)
+                              .foregroundColor(.gray.opacity(0.6))
+                      }
+                  }
+              }
+          }
+
+          // MARK: - Download Manager
+          @MainActor
+          class DownloadManager: ObservableObject {
+              @Published var progress: Double = 0
+              @Published var status: String = "Checking cache..."
+              @Published var isReady: Bool = false
+              @Published var error: String?
+
+              private var downloadTask: Task<Void, Never>?
+
+              let version: String
+              let releaseStatus: String
+
+              init(version: String = "4.7", status: String = "stable") {
+                  self.version = version
+                  self.releaseStatus = status
+              }
+
+              var cacheDirectory: URL {
+                  FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                      .appendingPathComponent("godot_editor_cache", isDirectory: true)
+              }
+
+              func startIfNeeded() {
+                  downloadTask?.cancel()
+                  downloadTask = Task {
+                      await checkAndDownload()
+                  }
+              }
+
+              func retry() {
+                  error = nil
+                  progress = 0
+                  startIfNeeded()
+              }
+
+              private func checkAndDownload() async {
+                  let htmlPath = cacheDirectory.appendingPathComponent("godot.editor.html").path
+                  let dataPath = cacheDirectory.appendingPathComponent("godot.editor.data").path
+
+                  if FileManager.default.fileExists(atPath: htmlPath) &&
+                     FileManager.default.fileExists(atPath: dataPath) {
+                      status = "Found cached files!"
+                      try? await Task.sleep(nanoseconds: 500_000_000)
+                      isReady = true
+                      return
+                  }
+
+                  do {
+                      try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+
+                      let zipURL = cacheDirectory.appendingPathComponent("web_editor.zip")
+
+                      // Clean up old zip if exists
+                      if FileManager.default.fileExists(atPath: zipURL.path) {
+                          try FileManager.default.removeItem(at: zipURL)
+                      }
+
+                      let sources = [
+                          "https://github.com/godotengine/godot-builds/releases/download/\(version)-\(releaseStatus)/Godot_v\(version)-\(releaseStatus)_web_editor.zip",
+                          "https://downloads.tuxfamily.org/godotengine/\(version)/Godot_v\(version)-\(releaseStatus)_web_editor.zip"
+                      ]
+
+                      var success = false
+                      for source in sources {
+                          if Task.isCancelled { return }
+                          status = "Downloading..."
+
+                          if await downloadZip(from: source, to: zipURL) {
+                              success = true
+                              break
+                          }
+                      }
+
+                      guard success else {
+                          error = "Failed to download from all sources.\\nCheck internet connection."
+                          return
+                      }
+
+                      if Task.isCancelled { return }
+                      status = "Extracting files..."
+                      progress = 0.95
+
+                      try FileManager.default.unzipItem(at: zipURL, to: cacheDirectory)
+                      try? FileManager.default.removeItem(at: zipURL)
+
+                      try flattenSubdirectory()
+
+                      guard FileManager.default.fileExists(atPath: htmlPath),
+                            FileManager.default.fileExists(atPath: dataPath) else {
+                          error = "Extracted files incomplete. Please retry."
+                          return
+                      }
+
+                      status = "Ready!"
+                      progress = 1.0
+                      try? await Task.sleep(nanoseconds: 500_000_000)
+                      isReady = true
+
+                  } catch {
+                      self.error = "Error: \(error.localizedDescription)"
+                  }
+              }
+
+              private func downloadZip(from urlString: String, to destination: URL) async -> Bool {
+                  guard let url = URL(string: urlString) else { return false }
+
+                  do {
+                      let (bytes, response) = try await URLSession.shared.bytes(from: url)
+                      let total = response.expectedContentLength
+                      guard total > 0 else { return false }
+
+                      FileManager.default.createFile(atPath: destination.path, contents: nil)
+                      let handle = try FileHandle(forWritingTo: destination)
+                      defer { try? handle.close() }
+
+                      var downloaded: Int64 = 0
+                      var buffer = [UInt8](repeating: 0, count: 65536)
+                      var bufIdx = 0
+
+                      for try await byte in bytes {
+                          buffer[bufIdx] = byte
+                          bufIdx += 1
+                          downloaded += 1
+
+                          if bufIdx >= buffer.count {
+                              handle.write(Data(buffer))
+                              bufIdx = 0
+
+                              let pct = Double(downloaded) / Double(total)
+                              await MainActor.run {
+                                  self.progress = min(pct, 0.99)
+                              }
+                          }
+                      }
+
+                      if bufIdx > 0 {
+                          handle.write(Data(buffer[0..<bufIdx]))
+                      }
+
+                      await MainActor.run { self.progress = 1.0 }
+                      return true
+
+                  } catch {
+                      return false
+                  }
+              }
+
+              private func flattenSubdirectory() throws {
+                  let contents = try FileManager.default.contentsOfDirectory(
+                      at: cacheDirectory,
+                      includingPropertiesForKeys: [.isDirectoryKey]
+                  )
+                  for item in contents {
+                      var isDir: ObjCBool = false
+                      if item.hasDirectoryPath &&
+                         FileManager.default.fileExists(atPath: item.path, isDirectory: &isDir) &&
+                         isDir.boolValue &&
+                         item.lastPathComponent != "godot_editor_cache" {
+
+                          let subContents = try FileManager.default.contentsOfDirectory(at: item, includingPropertiesForKeys: nil)
+                          for subItem in subContents {
+                              let dest = cacheDirectory.appendingPathComponent(subItem.lastPathComponent)
+                              if !FileManager.default.fileExists(atPath: dest.path) {
+                                  try FileManager.default.moveItem(at: subItem, to: dest)
+                              }
+                          }
+                          try FileManager.default.removeItem(at: item)
+                          break
+                      }
+                  }
+              }
+          }
+
+          // MARK: - Editor View
+          struct EditorView: UIViewRepresentable {
+              func makeUIView(context: Context) -> WKWebView {
+                  let cfg = WKWebViewConfiguration()
+                  cfg.preferences.javaScriptEnabled = true
+                  cfg.preferences.javaScriptCanOpenWindowsAutomatically = true
+                  cfg.allowsInlineMediaPlayback = true
+                  cfg.mediaTypesRequiringUserActionForPlayback = []
+                  cfg.processPool = WKProcessPool()
+
+                  if #available(iOS 15.0, *) {
+                      let p = WKWebpagePreferences()
+                      p.allowsContentJavaScript = true
+                      cfg.defaultWebpagePreferences = p
+                  }
+
+                  cfg.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+
+                  let bridge = JSBridge()
+                  cfg.userContentController.add(bridge, name: "iosLog")
+
+                  let fixScript = """
+                  (function(){
+                      var meta = document.createElement('meta');
+                      meta.name = 'viewport';
+                      meta.content = 'width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=3.0, user-scalable=yes';
+                      document.head.appendChild(meta);
+
+                      var ol=console.log, oe=console.error, ow=console.warn;
+                      function send(l,a){
+                          try{
+                              window.webkit.messageHandlers.iosLog.postMessage('['+l+'] '+Array.from(a).map(String).join(' '));
+                          }catch(e){}
+                      }
+                      console.log=function(){send('LOG',arguments);ol.apply(console,arguments);};
+                      console.error=function(){send('ERR',arguments);oe.apply(console,arguments);};
+                      console.warn=function(){send('WRN',arguments);ow.apply(console,arguments);};
+                      window.onerror=function(m,u,l,c,err){send('FATAL',[m,'at',u+':'+l+':'+c]);return false;};
+                      window.onunhandledrejection=function(e){send('REJ',['Unhandled:',e.reason]);};
+
+                      var style = document.createElement('style');
+                      style.textContent = 'html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; } canvas { display: block; }';
+                      document.head.appendChild(style);
+
+                      console.log('GODOT-iOS: Online loader ready');
+                  })();
+                  """
+                  cfg.userContentController.addUserScript(
+                      WKUserScript(source: fixScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+                  )
+
+                  let wv = WKWebView(frame: .zero, configuration: cfg)
+                  wv.scrollView.bounces = true
+                  wv.scrollView.alwaysBounceVertical = false
+                  wv.scrollView.alwaysBounceHorizontal = false
+                  wv.scrollView.bouncesZoom = true
+                  wv.scrollView.minimumZoomScale = 0.5
+                  wv.scrollView.maximumZoomScale = 3.0
+                  wv.scrollView.isScrollEnabled = true
+                  wv.scrollView.pinchGestureRecognizer?.isEnabled = true
+                  wv.backgroundColor = .black
+                  wv.isOpaque = true
+                  wv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+
+                  if #available(iOS 16.4, *) {
+                      wv.isInspectable = true
+                  }
+
+                  let nav = NavDebug()
+                  wv.navigationDelegate = nav
+                  context.coordinator.nav = nav
+
+                  let cacheDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                      .appendingPathComponent("godot_editor_cache")
+                  let server = LocalHTTPServer(rootPath: cacheDir.path)
+
+                  if server.start() {
+                      context.coordinator.server = server
+                      usleep(300000)
+                      if let url = URL(string: "http://127.0.0.1:8765/") {
+                          wv.load(URLRequest(url: url))
+                      }
+                  }
+
+                  return wv
+              }
+
+              func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+              func makeCoordinator() -> Coordinator {
+                  Coordinator()
+              }
+
+              class Coordinator: NSObject {
+                  var server: LocalHTTPServer?
+                  var nav: NavDebug?
+              }
+          }
+
+          // MARK: - JS Bridge
+          final class JSBridge: NSObject, WKScriptMessageHandler {
+              func userContentController(_ ucc: WKUserContentController, didReceive msg: WKScriptMessage) {
+                  if let body = msg.body as? String {
+                      print("[GODOT] \(body)")
+                  }
+              }
+          }
+
+          // MARK: - Navigation Delegate
+          final class NavDebug: NSObject, WKNavigationDelegate {
+              func webView(_ wv: WKWebView, didFinish nav: WKNavigation!) {
+                  print("[WEBVIEW] didFinish")
+              }
+              func webView(_ wv: WKWebView, didFail nav: WKNavigation!, withError err: Error) {
+                  print("[WEBVIEW] didFail: \(err)")
+              }
+              func webView(_ wv: WKWebView, didFailProvisionalNavigation nav: WKNavigation!, withError err: Error) {
+                  print("[WEBVIEW] provisionalFail: \(err)")
+              }
+          }
+
+          // MARK: - Local HTTP Server
           final class LocalHTTPServer: NSObject {
               private var listener: NWListener?
               private let root: String
@@ -259,10 +505,8 @@ jobs:
                       let sep = Data("\r\n\r\n".utf8)
                       if let range = buf.range(of: sep) {
                           let headerBytes = buf.subdata(in: 0..<range.upperBound)
-                          let bodyBytes = buf.subdata(in: range.upperBound..<buf.count)
-
                           if let requestText = String(data: headerBytes, encoding: .utf8) {
-                              self.serve(connection: connection, request: requestText, bodyData: bodyBytes)
+                              self.serve(connection: connection, request: requestText)
                               return
                           }
                       }
@@ -275,7 +519,7 @@ jobs:
                   }
               }
 
-              private func serve(connection: NWConnection, request: String, bodyData: Data) {
+              private func serve(connection: NWConnection, request: String) {
                   let lines = request.split(separator: "\r\n")
                   guard let first = lines.first else {
                       sendHTTP(connection: connection, status: 400, body: Data())
@@ -368,7 +612,6 @@ jobs:
                   }
               }
 
-              // Auto-detect the HTML entry point from available files
               private var entryHTML: String {
                   let candidates = ["godot.editor.html", "godot.web.editor.html", "godot.html", "index.html"]
                   for candidate in candidates {
@@ -378,151 +621,6 @@ jobs:
                       }
                   }
                   return "index.html"
-              }
-          }
-
-          final class JSBridge: NSObject, WKScriptMessageHandler {
-              func userContentController(_ ucc: WKUserContentController, didReceive msg: WKScriptMessage) {
-                  if let body = msg.body as? String {
-                      print("[GODOT] \(body)")
-                  }
-              }
-          }
-
-          final class NavDebug: NSObject, WKNavigationDelegate {
-              func webView(_ wv: WKWebView, didFinish nav: WKNavigation!) {
-                  print("[WEBVIEW] didFinish")
-              }
-              func webView(_ wv: WKWebView, didFail nav: WKNavigation!, withError err: Error) {
-                  print("[WEBVIEW] didFail: \(err)")
-              }
-              func webView(_ wv: WKWebView, didFailProvisionalNavigation nav: WKNavigation!, withError err: Error) {
-                  print("[WEBVIEW] provisionalFail: \(err)")
-              }
-          }
-
-          @main
-          struct GodotWebEditorApp: App {
-              var body: some Scene {
-                  WindowGroup {
-                      EditorView()
-                          .edgesIgnoringSafeArea(.all)
-                  }
-              }
-          }
-
-          struct EditorView: UIViewRepresentable {
-              func makeUIView(context: Context) -> WKWebView {
-                  let cfg = WKWebViewConfiguration()
-
-                  cfg.preferences.javaScriptEnabled = true
-                  cfg.preferences.javaScriptCanOpenWindowsAutomatically = true
-                  cfg.allowsInlineMediaPlayback = true
-                  cfg.mediaTypesRequiringUserActionForPlayback = []
-                  cfg.processPool = WKProcessPool()
-
-                  if #available(iOS 15.0, *) {
-                      let p = WKWebpagePreferences()
-                      p.allowsContentJavaScript = true
-                      cfg.defaultWebpagePreferences = p
-                  }
-
-                  cfg.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
-
-                  let bridge = JSBridge()
-                  cfg.userContentController.add(bridge, name: "iosLog")
-
-                  let fixScript = """
-                  (function(){
-                      var meta = document.createElement('meta');
-                      meta.name = 'viewport';
-                      meta.content = 'width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=3.0, user-scalable=yes';
-                      document.head.appendChild(meta);
-
-                      var ol=console.log, oe=console.error, ow=console.warn;
-                      function send(l,a){
-                          try{
-                              window.webkit.messageHandlers.iosLog.postMessage('['+l+'] '+Array.from(a).map(String).join(' '));
-                          }catch(e){}
-                      }
-                      console.log=function(){send('LOG',arguments);ol.apply(console,arguments);};
-                      console.error=function(){send('ERR',arguments);oe.apply(console,arguments);};
-                      console.warn=function(){send('WRN',arguments);ow.apply(console,arguments);};
-                      window.onerror=function(m,u,l,c,err){send('FATAL',[m,'at',u+':'+l+':'+c]);return false;};
-                      window.onunhandledrejection=function(e){send('REJ',['Unhandled:',e.reason]);};
-
-                      var origGetContext = HTMLCanvasElement.prototype.getContext;
-                      HTMLCanvasElement.prototype.getContext = function(type, attrs) {
-                          var ctx = origGetContext.call(this, type, attrs);
-                          if (type === 'webgl2' || type === 'webgl') {
-                              console.log('Canvas WebGL context created:', type);
-                          }
-                          return ctx;
-                      };
-
-                      var style = document.createElement('style');
-                      style.textContent = 'html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; } canvas { display: block; }';
-                      document.head.appendChild(style);
-
-                      console.log('GODOT-iOS: Fix script loaded');
-                      console.log('crossOriginIsolated:', window.crossOriginIsolated);
-                  })();
-                  """
-                  cfg.userContentController.addUserScript(
-                      WKUserScript(source: fixScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
-                  )
-
-                  let wv = WKWebView(frame: .zero, configuration: cfg)
-
-                  wv.scrollView.bounces = true
-                  wv.scrollView.alwaysBounceVertical = false
-                  wv.scrollView.alwaysBounceHorizontal = false
-                  wv.scrollView.bouncesZoom = true
-                  wv.scrollView.minimumZoomScale = 0.5
-                  wv.scrollView.maximumZoomScale = 3.0
-                  wv.scrollView.isScrollEnabled = true
-                  wv.scrollView.pinchGestureRecognizer?.isEnabled = true
-
-                  wv.backgroundColor = .black
-                  wv.isOpaque = true
-                  wv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-
-                  if #available(iOS 16.4, *) {
-                      wv.isInspectable = true
-                  }
-
-                  let nav = NavDebug()
-                  wv.navigationDelegate = nav
-                  context.coordinator.nav = nav
-
-                  let godotPath = Bundle.main.bundlePath + "/godot_editor"
-                  let server = LocalHTTPServer(rootPath: godotPath)
-
-                  if server.start() {
-                      context.coordinator.server = server
-                      print("[APP] Server started, loading editor...")
-                      usleep(300000)
-
-                      if let url = URL(string: "http://127.0.0.1:8765/") {
-                          wv.load(URLRequest(url: url))
-                      }
-                  } else {
-                      print("[APP] Server failed!")
-                      wv.loadHTMLString("<html><body style=\"background:#000;color:#f00;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;\"><div style=\"text-align:center\"><h1>Server Error</h1><p>Could not start HTTP server</p></div></body></html>", baseURL: nil)
-                  }
-
-                  return wv
-              }
-
-              func updateUIView(_ uiView: WKWebView, context: Context) {}
-
-              func makeCoordinator() -> Coordinator {
-                  Coordinator()
-              }
-
-              class Coordinator: NSObject {
-                  var server: LocalHTTPServer?
-                  var nav: NavDebug?
               }
           }
           SWIFTEOF
@@ -535,7 +633,7 @@ jobs:
               <key>CFBundleDevelopmentRegion</key><string>en</string>
               <key>CFBundleDisplayName</key><string>Godot Editor</string>
               <key>CFBundleExecutable</key><string>GodotWebEditor</string>
-              <key>CFBundleIdentifier</key><string>com.godot.webeditor.local</string>
+              <key>CFBundleIdentifier</key><string>com.godot.webeditor.online</string>
               <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
               <key>CFBundleName</key><string>GodotWebEditor</string>
               <key>CFBundlePackageType</key><string>APPL</string>
@@ -585,7 +683,7 @@ jobs:
                                           <color key="textColor" red="0.93725490570000003" green="0.93725490570000003" blue="0.95686274770000002" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                                           <nil key="highlightedColor"/>
                                       </label>
-                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • Native Touch • WebGL • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
+                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Online • Download on First Launch" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
                                           <rect key="frame" x="0.0" y="314.66666666666669" width="393" height="21"/>
                                           <fontDescription key="fontDescription" type="system" pointSize="15"/>
                                           <color key="textColor" red="0.5803921569" green="0.5960784314" blue="0.6392156863" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
@@ -632,7 +730,7 @@ jobs:
           settings:
             MARKETING_VERSION: "1.0.0"
             CURRENT_PROJECT_VERSION: "1"
-            PRODUCT_BUNDLE_IDENTIFIER: com.godot.webeditor.local
+            PRODUCT_BUNDLE_IDENTIFIER: com.godot.webeditor.online
             SWIFT_VERSION: "5.9"
             IPHONEOS_DEPLOYMENT_TARGET: "15.0"
             TARGETED_DEVICE_FAMILY: "1,2"
@@ -641,6 +739,10 @@ jobs:
             CODE_SIGNING_ALLOWED: NO
             DEVELOPMENT_TEAM: ""
             ENABLE_BITCODE: NO
+          packages:
+            ZIPFoundation:
+              url: https://github.com/weichsel/ZIPFoundation.git
+              from: 0.9.19
           targets:
             GodotWebEditor:
               type: application
@@ -650,6 +752,8 @@ jobs:
                 - path: Sources
               resources:
                 - path: Resources
+              dependencies:
+                - package: ZIPFoundation
               info:
                 path: Info.plist
           YAMLEOF
@@ -698,27 +802,8 @@ jobs:
           echo ""
           echo "📂 .app contents:"
           ls -la "$APP_PATH/"
-
-          if [ ! -d "$APP_PATH/godot_editor" ]; then
-            echo "⚠️ godot_editor missing! Copying manually..."
-            mkdir -p "$APP_PATH/godot_editor"
-            cp -R GodotWebEditor/Resources/godot_editor/* "$APP_PATH/godot_editor/"
-          fi
-
           echo ""
-          echo "📂 godot_editor in .app:"
-          ls -la "$APP_PATH/godot_editor/"
-          echo ""
-          echo "📊 godot_editor size: $(du -sh "$APP_PATH/godot_editor" | cut -f1)"
           echo "📊 Total .app size: $(du -sh "$APP_PATH" | cut -f1)"
-
-          # Final verification: check .data file is in the app bundle
-          if [ ! -f "$APP_PATH/godot_editor/godot.editor.data" ]; then
-            echo "❌ CRITICAL: godot.editor.data missing from final .app bundle!"
-            exit 1
-          else
-            echo "✅ godot.editor.data confirmed in .app bundle"
-          fi
 
       - name: 📦 Package IPA
         run: |
@@ -730,8 +815,8 @@ jobs:
           cp -R "$APP_PATH" Payload/
           rm -rf Payload/GodotWebEditor.app/_CodeSignature 2>/dev/null || true
 
-          VERSION="${{ github.event.inputs.godot_version || '4.3' }}"
-          IPA_NAME="GodotWebEditor_v${VERSION}_unsigned.ipa"
+          VERSION="${{ github.event.inputs.godot_version || '4.7' }}"
+          IPA_NAME="GodotWebEditor_Online_v${VERSION}_unsigned.ipa"
 
           zip -qr "$IPA_NAME" Payload
           rm -rf Payload
@@ -742,8 +827,8 @@ jobs:
       - name: ⬆️ Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: godot-web-editor-ipa
-          path: GodotWebEditor_v*_unsigned.ipa
+          name: godot-web-editor-online-ipa
+          path: GodotWebEditor_Online_v*_unsigned.ipa
           retention-days: 30
 
       - name: ✅ Done
@@ -754,6 +839,6 @@ jobs:
           echo "╠══════════════════════════════════════════════════════╣"
           echo "║  📁 File: ${{ env.IPA_NAME }}                                  ║"
           echo "║  📱 Install: AltStore / Sideloadly / Scarlet         ║"
-          echo "║  🔧 Original filenames preserved                     ║"
-          echo "║  🔧 .data file verified in bundle                    ║"
+          echo "║  🌐 Downloads Godot files on first launch            ║"
+          echo "║  💾 Caches locally for offline use                   ║"
           echo "╚══════════════════════════════════════════════════════╝"
