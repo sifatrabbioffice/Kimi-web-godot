@@ -20,35 +20,36 @@ jobs:
   build-ipa:
     runs-on: macos-latest
     steps:
-      - name: 1 Checkout Repo
+      - name: 1Checkout Repo
         uses: actions/checkout@v4
 
-      - name: 2 Setup Xcode
+      - name: 2Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
 
-      - name: 3 Install xcodegen
+      - name: 3Install xcodegen
         run: brew install xcodegen
 
-      # ============================================================
-      # 📥 Download & Extract
-      # ============================================================
-      - name: 4 Download Godot Web Editor
+      - name: 4Download Godot Web Editor
         run: |
           set -ex
-          VERSION="${{ github.event.inputs.godot_version || '4.7.1' }}"
+          VERSION="${{ github.event.inputs.godot_version || '4.3' }}"
           STATUS="${{ github.event.inputs.godot_status || 'stable' }}"
+
           echo "=========================================="
           echo "📥 Downloading Godot ${VERSION}-${STATUS}"
           echo "=========================================="
+
           mkdir -p godot_editor
           cd godot_editor
+
           SOURCES=(
             "https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
             "https://downloads.tuxfamily.org/godotengine/${VERSION}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
             "https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/web_editor.zip"
           )
+
           for URL in "${SOURCES[@]}"; do
             echo "Trying: $URL"
             if curl -fsL --max-time 60 -o web_editor.zip "$URL"; then
@@ -57,104 +58,52 @@ jobs:
             fi
             echo "❌ Failed"
           done
+
           if [ ! -f web_editor.zip ] || [ ! -s web_editor.zip ]; then
             echo "❌ All sources failed"
             exit 1
           fi
+
           echo "📦 ZIP: $(ls -lh web_editor.zip | awk '{print $5}')"
           unzip -q web_editor.zip || { echo "❌ Bad ZIP"; exit 1; }
           rm -f web_editor.zip
 
-          # Flatten subdirectory if present
+          # Flatten if inside a subdirectory
           SUBDIR=$(find . -maxdepth 1 -type d | grep -v '^\.$' | head -n 1)
           if [ -n "$SUBDIR" ] && [ -d "$SUBDIR" ]; then
             mv "$SUBDIR"/* . 2>/dev/null || true
             rmdir "$SUBDIR" 2>/dev/null || true
           fi
 
-          # ──────────────────────────────────────────────────────────
-          # 🔍 Check all required files
-          # ──────────────────────────────────────────────────────────
-          REQUIRED_FILES=(
-            "godot.editor.js"
-            "godot.editor.wasm"
-            "service.worker.js"
-            "godot.editor.html"
-            "favicon.png"
-            "godot.editor.audio.position.worklet.js"
-            "godot.editor.audio.worklet.js"
-            "inter-bold.woff2"
-            "inter-regular.woff2"
-            "logo.svg"
-            "manifest.json"
-            "offline.html"
-          )
-          echo "──────────────────────────────────────────"
-          echo "🔍 Checking required files..."
-          MISSING=()
-          for f in "${REQUIRED_FILES[@]}"; do
-            if [ -f "$f" ]; then
-              echo "  ✅ $f"
-            else
-              echo "  ❌ $f"
-              MISSING+=("$f")
-            fi
-          done
-          if [ ${#MISSING[@]} -gt 0 ]; then
-            echo "⚠️ Missing files: ${MISSING[*]}"
-            echo "Continuing anyway, but some features may be broken."
-          fi
-          echo "──────────────────────────────────────────"
-
-          # ──────────────────────────────────────────────────────────
-          # 🔄 Rename godot.editor.wasm → godot.editor.wasm32.wasm
-          #    and update references in the .js file
-          # ──────────────────────────────────────────────────────────
-          if [ -f "godot.editor.wasm" ]; then
-            echo "🔄 Renaming godot.editor.wasm → godot.editor.wasm32.wasm"
-            mv godot.editor.wasm godot.editor.wasm32.wasm
-            echo "✅ Renamed successfully"
-            # Update .js file to reference the new .wasm name
-            if [ -f "godot.editor.js" ]; then
-              echo "🔄 Updating godot.editor.js to use new .wasm filename"
-              sed -i '' 's/godot\.editor\.wasm/godot.editor.wasm32.wasm/g' godot.editor.js
-              echo "✅ .js updated"
-            fi
-          else
-            echo "⚠️ godot.editor.wasm not found, skipping rename"
-          fi
-
-          # ──────────────────────────────────────────────────────────
-          # 📄 Detect main HTML file (for the embedded server)
-          # ──────────────────────────────────────────────────────────
-          DEFAULT_HTML=""
+          # Rename main HTML to index.html
           for f in godot.editor.html godot.web.editor.html godot.html; do
-            if [ -f "$f" ]; then
-              DEFAULT_HTML="$f"
-              echo "🔍 Found main HTML: $f"
+            if [ -f "$f" ] && [ "$f" != "index.html" ]; then
+              mv "$f" index.html
+              echo "📝 Renamed $f → index.html"
               break
             fi
           done
-          if [ -z "$DEFAULT_HTML" ]; then
-            echo "❌ No known main HTML file found! Contents:"
-            ls -la
+
+          # 🔁 Handle Godot 4.4+ wasm naming (godot.editor.wasm → godot.editor.wasm32.wasm)
+          if [ -f godot.editor.wasm ] && [ ! -f godot.editor.wasm32.wasm ]; then
+            mv godot.editor.wasm godot.editor.wasm32.wasm
+            echo "📝 Renamed godot.editor.wasm → godot.editor.wasm32.wasm"
+          fi
+
+          echo "✅ Files inside godot_editor:"
+          ls -la
+
+          if [ ! -f index.html ]; then
+            echo "❌ No index.html! Aborting."
             exit 1
           fi
 
-          echo "DEFAULT_HTML_FILE=$DEFAULT_HTML" >> "$GITHUB_ENV"
-          echo "✅ Main HTML = $DEFAULT_HTML"
-          echo "📂 Ready: $(du -sh . | cut -f1), $(find . -type f | wc -l) files"
-          ls -la
+          echo "✅ Ready: $(du -sh . | cut -f1), $(find . -type f | wc -l) files"
           cd ..
 
-      # ============================================================
-      # 🔧 iOS App creation (uses DEFAULT_HTML_FILE from env)
-      # ============================================================
-      - name: 5 Create iOS App
+      - name: 5Create iOS App
         run: |
           set -ex
-          DEFAULT_HTML="${DEFAULT_HTML_FILE}"
-          echo "✅ Using default HTML: $DEFAULT_HTML"
 
           mkdir -p GodotWebEditor/Sources
           mkdir -p GodotWebEditor/Resources/godot_editor
@@ -164,7 +113,6 @@ jobs:
           cp -R godot_editor/* GodotWebEditor/Resources/godot_editor/
           echo "✅ Copied $(find GodotWebEditor/Resources/godot_editor -type f | wc -l) files"
 
-          # Swift source with placeholder for default HTML
           cat > GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
           import SwiftUI
           import WebKit
@@ -174,18 +122,17 @@ jobs:
           final class LocalHTTPServer: NSObject {
               private var listener: NWListener?
               private let root: String
-              private let defaultHtml: String
               private var ready = false
 
-              init(rootPath: String, defaultHtmlFile: String) {
+              init(rootPath: String) {
                   self.root = rootPath
-                  self.defaultHtml = defaultHtmlFile
               }
 
               func start() -> Bool {
                   do {
                       let params = NWParameters.tcp
                       listener = try NWListener(using: params, on: NWEndpoint.Port(integerLiteral: 8765))
+
                       listener?.stateUpdateHandler = { [weak self] state in
                           switch state {
                           case .ready:
@@ -198,10 +145,13 @@ jobs:
                           default: break
                           }
                       }
+
                       listener?.newConnectionHandler = { [weak self] conn in
                           self?.handleConnection(conn)
                       }
+
                       listener?.start(queue: .global())
+
                       for _ in 0..<30 {
                           if ready { break }
                           usleep(100000)
@@ -221,22 +171,27 @@ jobs:
               private func readHTTP(connection: NWConnection, buffer: Data) {
                   connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, error in
                       guard let self = self else { connection.cancel(); return }
+
                       if let error = error {
                           print("[SERVER] Recv error: \(error)")
                           connection.cancel()
                           return
                       }
+
                       var buf = buffer
                       if let c = content { buf.append(c) }
+
                       let sep = Data("\r\n\r\n".utf8)
                       if let range = buf.range(of: sep) {
                           let headerBytes = buf.subdata(in: 0..<range.upperBound)
                           let bodyBytes = buf.subdata(in: range.upperBound..<buf.count)
+
                           if let requestText = String(data: headerBytes, encoding: .utf8) {
                               self.serve(connection: connection, request: requestText, bodyData: bodyBytes)
                               return
                           }
                       }
+
                       if isComplete {
                           connection.cancel()
                       } else {
@@ -251,35 +206,37 @@ jobs:
                       sendHTTP(connection: connection, status: 400, body: Data())
                       return
                   }
+
                   let parts = first.split(separator: " ")
                   guard parts.count >= 2 else {
                       sendHTTP(connection: connection, status: 400, body: Data())
                       return
                   }
+
                   let rawPath = String(parts[1])
-                  let path: String
-                  if rawPath == "/" {
-                      path = "/" + self.defaultHtml
-                      print("[SERVER] Default file: \(path)")
-                  } else {
-                      path = rawPath
-                  }
+                  let path = rawPath == "/" ? "/index.html" : rawPath
+
                   let filePath = (root + path).replacingOccurrences(of: "..", with: "")
                   let stdPath = (filePath as NSString).standardizingPath
                   let stdRoot = (root as NSString).standardizingPath
+
                   guard stdPath.hasPrefix(stdRoot) else {
                       sendHTTP(connection: connection, status: 403, body: Data())
                       return
                   }
+
                   guard FileManager.default.fileExists(atPath: stdPath),
                         let data = FileManager.default.contents(atPath: stdPath) else {
                       print("[SERVER] 404: \(path)")
                       sendHTTP(connection: connection, status: 404, body: Data())
                       return
                   }
+
                   let ext = (stdPath as NSString).pathExtension.lowercased()
                   let mime = mimeFor(ext: ext)
+
                   print("[SERVER] 200 \(path) (\(data.count) bytes)")
+
                   var header = "HTTP/1.1 200 OK\r\n"
                   header += "Content-Type: " + mime + "\r\n"
                   header += "Content-Length: " + String(data.count) + "\r\n"
@@ -288,10 +245,12 @@ jobs:
                   header += "Access-Control-Allow-Origin: *\r\n"
                   header += "Connection: close\r\n"
                   header += "\r\n"
+
                   guard let headerData = header.data(using: .utf8) else {
                       connection.cancel()
                       return
                   }
+
                   connection.send(content: headerData, completion: .contentProcessed { _ in
                       connection.send(content: data, completion: .contentProcessed { _ in
                           connection.cancel()
@@ -303,6 +262,7 @@ jobs:
                   var header = "HTTP/1.1 " + String(status) + " "
                   header += (status == 404 ? "Not Found" : (status == 403 ? "Forbidden" : "Error"))
                   header += "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
                   if let data = header.data(using: .utf8) {
                       connection.send(content: data, completion: .contentProcessed { _ in
                           connection.cancel()
@@ -367,16 +327,19 @@ jobs:
           struct EditorView: UIViewRepresentable {
               func makeUIView(context: Context) -> WKWebView {
                   let cfg = WKWebViewConfiguration()
+
                   cfg.preferences.javaScriptEnabled = true
                   cfg.preferences.javaScriptCanOpenWindowsAutomatically = true
                   cfg.allowsInlineMediaPlayback = true
                   cfg.mediaTypesRequiringUserActionForPlayback = []
                   cfg.processPool = WKProcessPool()
+
                   if #available(iOS 15.0, *) {
                       let p = WKWebpagePreferences()
                       p.allowsContentJavaScript = true
                       cfg.defaultWebpagePreferences = p
                   }
+
                   cfg.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
 
                   let bridge = JSBridge()
@@ -384,37 +347,38 @@ jobs:
 
                   let fixScript = """
                   (function(){
-                      var meta = document.createElement('meta');
-                      meta.name = 'viewport';
-                      meta.content = 'width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=3.0, user-scalable=yes';
-                      document.head.appendChild(meta);
-                      var ol=console.log, oe=console.error, ow=console.warn;
-                      function send(l,a){
-                          try{
-                              window.webkit.messageHandlers.iosLog.postMessage('['+l+'] '+Array.from(a).map(String).join(' '));
-                          }catch(e){}
-                      }
-                      console.log=function(){send('LOG',arguments);ol.apply(console,arguments);};
-                      console.error=function(){send('ERR',arguments);oe.apply(console,arguments);};
-                      console.warn=function(){send('WRN',arguments);ow.apply(console,arguments);};
-                      window.onerror=function(m,u,l,c,err){send('FATAL',[m,'at',u+':'+l+':'+c]);return false;};
-                      window.onunhandledrejection=function(e){send('REJ',['Unhandled:',e.reason]);};
-                      var origGetContext = HTMLCanvasElement.prototype.getContext;
-                      HTMLCanvasElement.prototype.getContext = function(type, attrs) {
-                          var ctx = origGetContext.call(this, type, attrs);
-                          if (type === 'webgl2' || type === 'webgl') {
-                              console.log('Canvas WebGL context created:', type);
-                          }
-                          return ctx;
-                      };
-                      var style = document.createElement('style');
-                      style.textContent = `
-                          html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
-                          #canvas, canvas { display: block; }
-                      `;
-                      document.head.appendChild(style);
-                      console.log('GODOT-iOS: Minimal fix loaded. Godot handles touch natively.');
-                      console.log('crossOriginIsolated:', window.crossOriginIsolated);
+                  var meta = document.createElement('meta');
+                  meta.name = 'viewport';
+                  meta.content = 'width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=3.0, user-scalable=yes';
+                  document.head.appendChild(meta);
+
+                  var ol=console.log, oe=console.error, ow=console.warn;
+                  function send(l,a){
+                  try{
+                  window.webkit.messageHandlers.iosLog.postMessage('['+l+'] '+Array.from(a).map(String).join(' '));
+                  }catch(e){}
+                  }
+                  console.log=function(){send('LOG',arguments);ol.apply(console,arguments);};
+                  console.error=function(){send('ERR',arguments);oe.apply(console,arguments);};
+                  console.warn=function(){send('WRN',arguments);ow.apply(console,arguments);};
+                  window.onerror=function(m,u,l,c,err){send('FATAL',[m,'at',u+':'+l+':'+c]);return false;};
+                  window.onunhandledrejection=function(e){send('REJ',['Unhandled:',e.reason]);};
+
+                  var origGetContext = HTMLCanvasElement.prototype.getContext;
+                  HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+                  var ctx = origGetContext.call(this, type, attrs);
+                  if (type === 'webgl2' || type === 'webgl') {
+                  console.log('Canvas WebGL context created:', type);
+                  }
+                  return ctx;
+                  };
+
+                  var style = document.createElement('style');
+                  style.textContent = 'html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; } #canvas, canvas { display: block; }';
+                  document.head.appendChild(style);
+
+                  console.log('GODOT-iOS: Minimal fix loaded.');
+                  console.log('crossOriginIsolated:', window.crossOriginIsolated);
                   })();
                   """
                   cfg.userContentController.addUserScript(
@@ -430,9 +394,11 @@ jobs:
                   wv.scrollView.maximumZoomScale = 3.0
                   wv.scrollView.isScrollEnabled = true
                   wv.scrollView.pinchGestureRecognizer?.isEnabled = true
+
                   wv.backgroundColor = .black
                   wv.isOpaque = true
                   wv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+
                   if #available(iOS 16.4, *) {
                       wv.isInspectable = true
                   }
@@ -442,20 +408,21 @@ jobs:
                   context.coordinator.nav = nav
 
                   let godotPath = Bundle.main.bundlePath + "/godot_editor"
-                  let defaultHtmlFile = "%%DEFAULT_HTML_FILE%%"
-                  let server = LocalHTTPServer(rootPath: godotPath, defaultHtmlFile: defaultHtmlFile)
+                  let server = LocalHTTPServer(rootPath: godotPath)
 
                   if server.start() {
                       context.coordinator.server = server
                       print("[APP] Server started, loading editor...")
                       usleep(300000)
-                      if let url = URL(string: "http://127.0.0.1:8765/") {
+
+                      if let url = URL(string: "http://127.0.0.1:8765/index.html") {
                           wv.load(URLRequest(url: url))
                       }
                   } else {
                       print("[APP] Server failed!")
                       wv.loadHTMLString("<html><body style=\"background:#000;color:#f00;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;\"><div style=\"text-align:center\"><h1>Server Error</h1><p>Could not start HTTP server</p></div></body></html>", baseURL: nil)
                   }
+
                   return wv
               }
 
@@ -472,10 +439,6 @@ jobs:
           }
           SWIFTEOF
 
-          # Replace placeholder with actual default HTML filename
-          sed -i '' "s|%%DEFAULT_HTML_FILE%%|${DEFAULT_HTML}|g" GodotWebEditor/Sources/App.swift
-
-          # Info.plist, LaunchScreen, Assets etc.
           cat > GodotWebEditor/Info.plist << 'PLISTEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -515,46 +478,46 @@ jobs:
           cat > GodotWebEditor/Resources/Base.lproj/LaunchScreen.storyboard << 'LAUNCHEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="21701" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="01J-lp-oVM">
-              <device id="retina6_12" orientation="portrait" appearance="dark"/>
-              <dependencies>
-                  <deployment identifier="iOS"/>
-                  <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="21679"/>
-              </dependencies>
-              <scenes>
-                  <scene sceneID="EHf-IW-A2E">
-                      <objects>
-                          <viewController id="01J-lp-oVM" sceneMemberID="viewController">
-                              <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">
-                                  <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
-                                  <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
-                                  <subviews>
-                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Godot Web Editor" textAlignment="center" lineBreakMode="middleTruncation" baselineAdjustment="alignBaselines" minimumFontSize="18" translatesAutoresizingMaskIntoConstraints="NO" id="GJd-Yh-RWb">
-                                          <rect key="frame" x="0.0" y="263.66666666666669" width="393" height="43"/>
-                                          <fontDescription key="fontDescription" type="boldSystem" pointSize="36"/>
-                                          <color key="textColor" red="0.93725490570000003" green="0.93725490570000003" blue="0.95686274770000002" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
-                                          <nil key="highlightedColor"/>
-                                      </label>
-                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • Native Touch • WebGL • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
-                                          <rect key="frame" x="0.0" y="314.66666666666669" width="393" height="21"/>
-                                          <fontDescription key="fontDescription" type="system" pointSize="15"/>
-                                          <color key="textColor" red="0.5803921569" green="0.5960784314" blue="0.6392156863" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
-                                          <nil key="highlightedColor"/>
-                                      </label>
-                                  </subviews>
-                                  <color key="backgroundColor" red="0.05098039216" green="0.06666666667" blue="0.09019607843" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
-                                  <constraints>
-                                      <constraint firstItem="GJd-Yh-RWb" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="e1q-4Y-1Sd"/>
-                                      <constraint firstItem="GJd-Yh-RWb" firstAttribute="centerY" secondItem="Ze5-6b-2t3" secondAttribute="centerY" constant="-20" id="Rmq-lb-GrQ"/>
-                                      <constraint firstItem="MN2-Qa-3nb" firstAttribute="top" secondItem="GJd-Yh-RWb" secondAttribute="bottom" constant="8" id="abc-12-xyz"/>
-                                      <constraint firstItem="MN2-Qa-3nb" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="def-34-uvw"/>
-                                  </constraints>
-                              </view>
-                          </viewController>
-                          <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" userLabel="First Responder" sceneMemberID="firstResponder"/>
-                      </objects>
-                      <point key="canvasLocation" x="53" y="375"/>
-                  </scene>
-              </scenes>
+          <device id="retina6_12" orientation="portrait" appearance="dark"/>
+          <dependencies>
+          <deployment identifier="iOS"/>
+          <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="21679"/>
+          </dependencies>
+          <scenes>
+          <scene sceneID="EHf-IW-A2E">
+          <objects>
+          <viewController id="01J-lp-oVM" sceneMemberID="viewController">
+          <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">
+          <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
+          <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+          <subviews>
+          <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Godot Web Editor" textAlignment="center" lineBreakMode="middleTruncation" baselineAdjustment="alignBaselines" minimumFontSize="18" translatesAutoresizingMaskIntoConstraints="NO" id="GJd-Yh-RWb">
+          <rect key="frame" x="0.0" y="263.66666666666669" width="393" height="43"/>
+          <fontDescription key="fontDescription" type="boldSystem" pointSize="36"/>
+          <color key="textColor" red="0.93725490570000003" green="0.93725490570000003" blue="0.95686274770000002" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+          <nil key="highlightedColor"/>
+          </label>
+          <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • Native Touch • WebGL • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
+          <rect key="frame" x="0.0" y="314.66666666666669" width="393" height="21"/>
+          <fontDescription key="fontDescription" type="system" pointSize="15"/>
+          <color key="textColor" red="0.5803921569" green="0.5960784314" blue="0.6392156863" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+          <nil key="highlightedColor"/>
+          </label>
+          </subviews>
+          <color key="backgroundColor" red="0.05098039216" green="0.06666666667" blue="0.09019607843" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+          <constraints>
+          <constraint firstItem="GJd-Yh-RWb" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="e1q-4Y-1Sd"/>
+          <constraint firstItem="GJd-Yh-RWb" firstAttribute="centerY" secondItem="Ze5-6b-2t3" secondAttribute="centerY" constant="-20" id="Rmq-lb-GrQ"/>
+          <constraint firstItem="MN2-Qa-3nb" firstAttribute="top" secondItem="GJd-Yh-RWb" secondAttribute="bottom" constant="8" id="abc-12-xyz"/>
+          <constraint firstItem="MN2-Qa-3nb" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="def-34-uvw"/>
+          </constraints>
+          </view>
+          </viewController>
+          <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" userLabel="First Responder" sceneMemberID="firstResponder"/>
+          </objects>
+          <point key="canvasLocation" x="53" y="375"/>
+          </scene>
+          </scenes>
           </document>
           LAUNCHEOF
 
@@ -607,10 +570,11 @@ jobs:
           xcodegen generate
           cd ..
 
-      - name: 6 Build Unsigned .app
+      - name: 6Build Unsigned .app
         run: |
           set -ex
           cd GodotWebEditor
+
           xcodebuild \
             -project GodotWebEditor.xcodeproj \
             -scheme GodotWebEditor \
@@ -629,24 +593,29 @@ jobs:
             clean build
           cd ..
 
-      - name: 7 Verify .app Bundle
+      - name: 7Verify .app Bundle
         run: |
           set -ex
+
           APP_PATH=$(find DerivedData -name "GodotWebEditor.app" -type d | head -n 1)
+
           if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
             echo "❌ .app bundle not found!"
             find DerivedData -type d -name "*.app" 2>/dev/null || true
             exit 1
           fi
+
           echo "✅ Found app: $APP_PATH"
           echo ""
           echo "📂 .app contents:"
           ls -la "$APP_PATH/"
+
           if [ ! -d "$APP_PATH/godot_editor" ]; then
             echo "⚠️ godot_editor missing! Copying manually..."
             mkdir -p "$APP_PATH/godot_editor"
             cp -R GodotWebEditor/Resources/godot_editor/* "$APP_PATH/godot_editor/"
           fi
+
           echo ""
           echo "📂 godot_editor in .app:"
           ls -la "$APP_PATH/godot_editor/"
@@ -654,21 +623,26 @@ jobs:
           echo "📊 godot_editor size: $(du -sh "$APP_PATH/godot_editor" | cut -f1)"
           echo "📊 Total .app size: $(du -sh "$APP_PATH" | cut -f1)"
 
-      - name: 8 Package IPA
+      - name: 8Package IPA
         run: |
           set -ex
+
           APP_PATH=$(find DerivedData -name "GodotWebEditor.app" -type d | head -n 1)
+
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
           rm -rf Payload/GodotWebEditor.app/_CodeSignature 2>/dev/null || true
-          VERSION="${{ github.event.inputs.godot_version || '4.7.1' }}"
+
+          VERSION="${{ github.event.inputs.godot_version || '4.3' }}"
           IPA_NAME="GodotWebEditor_v${VERSION}_unsigned.ipa"
+
           zip -qr "$IPA_NAME" Payload
           rm -rf Payload
+
           echo "IPA_NAME=$IPA_NAME" >> "$GITHUB_ENV"
           echo "✅ Created: $IPA_NAME ($(du -sh "$IPA_NAME" | cut -f1))"
 
-      - name: 9 Upload IPA
+      - name: 9Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: godot-web-editor-ipa
@@ -683,7 +657,7 @@ jobs:
           echo "╠══════════════════════════════════════════════════════╣"
           echo "║  📁 File: $IPA_NAME                                  ║"
           echo "║  📱 Install: AltStore / Sideloadly / Scarlet         ║"
-          echo "║  🔧 Fix: Renamed .wasm & updated .js references      ║"
+          echo "║  🔧 Auto‑renamed wasm if needed (4.4+ compatibility) ║"
           echo "╚══════════════════════════════════════════════════════╝"
         env:
           IPA_NAME: ${{ env.IPA_NAME }}
