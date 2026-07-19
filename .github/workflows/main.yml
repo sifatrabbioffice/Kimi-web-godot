@@ -1,4 +1,4 @@
-name: 🎮 Godot Web Editor Online (Ultra Light)
+name: 🎮 Godot Web Editor → On-Demand Downloader IPA
 
 on:
   push:
@@ -7,8 +7,8 @@ on:
     branches: [main, master]
   workflow_dispatch:
     inputs:
-      editor_url:
-        description: 'Godot Web Editor URL'
+      base_url:
+        description: 'Godot Editor Base URL'
         required: true
         default: 'https://editor.godotengine.org/'
 
@@ -38,49 +38,62 @@ jobs:
           cat > GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
           import SwiftUI
           import WebKit
+          import Network
+          import Foundation
 
-          // MARK: - App Entry
+          // ═══════════════════════════════════════════════════════════════
+          // CONFIG
+          // ═══════════════════════════════════════════════════════════════
+          let BASE_URL = "${{ github.event.inputs.base_url || 'https://editor.godotengine.org/' }}"
+          let SERVER_PORT: UInt16 = 8765
+
+          // ═══════════════════════════════════════════════════════════════
+          // APP ENTRY
+          // ═══════════════════════════════════════════════════════════════
           @main
           struct GodotWebEditorApp: App {
               var body: some Scene {
                   WindowGroup {
-                      GodotEditorView()
+                      ContentView()
                           .edgesIgnoringSafeArea(.all)
                   }
               }
           }
 
-          // MARK: - Main View
-          struct GodotEditorView: View {
-              @StateObject private var webViewModel = WebViewModel()
+          // ═══════════════════════════════════════════════════════════════
+          // CONTENT VIEW
+          // ═══════════════════════════════════════════════════════════════
+          struct ContentView: View {
+              @StateObject private var serverManager = ServerManager()
 
               var body: some View {
-                  ZStack {
-                      WebView(model: webViewModel)
-                          .edgesIgnoringSafeArea(.all)
-
-                      if webViewModel.isLoading {
-                          LoadingOverlay(progress: webViewModel.loadProgress)
+                  Group {
+                      if serverManager.isReady {
+                          EditorWebView(serverManager: serverManager)
+                              .edgesIgnoringSafeArea(.all)
+                      } else {
+                          ServerSetupView(manager: serverManager)
                       }
-
-                      if let error = webViewModel.loadError {
-                          ErrorOverlay(error: error) {
-                              webViewModel.reload()
-                          }
-                      }
+                  }
+                  .onAppear {
+                      serverManager.start()
                   }
               }
           }
 
-          // MARK: - Loading Overlay
-          struct LoadingOverlay: View {
-              let progress: Double
+          // ═══════════════════════════════════════════════════════════════
+          // SERVER SETUP / DOWNLOAD VIEW
+          // ═══════════════════════════════════════════════════════════════
+          struct ServerSetupView: View {
+              @ObservedObject var manager: ServerManager
 
               var body: some View {
                   ZStack {
-                      Color.black.opacity(0.95).ignoresSafeArea()
+                      Color.black.ignoresSafeArea()
 
-                      VStack(spacing: 24) {
+                      VStack(spacing: 20) {
+                          Spacer()
+
                           Image(systemName: "cube.transparent")
                               .font(.system(size: 70))
                               .foregroundColor(.blue)
@@ -90,100 +103,146 @@ jobs:
                               .fontWeight(.bold)
                               .foregroundColor(.white)
 
-                          Text("Loading from cache or online...")
-                              .font(.subheadline)
-                              .foregroundColor(.gray)
-
-                          ProgressView(value: progress)
-                              .progressViewStyle(LinearProgressViewStyle(tint: .blue))
-                              .frame(width: 260)
-
-                          Text("\(Int(progress * 100))%")
-                              .font(.caption)
-                              .foregroundColor(.gray)
-
-                          Text("Files auto-cache in background:\nHTML • JS • WASM • DATA • PNG")
-                              .font(.caption2)
-                              .foregroundColor(.gray.opacity(0.7))
-                              .multilineTextAlignment(.center)
-                      }
-                  }
-              }
-          }
-
-          // MARK: - Error Overlay
-          struct ErrorOverlay: View {
-              let error: String
-              let onRetry: () -> Void
-
-              var body: some View {
-                  ZStack {
-                      Color.black.opacity(0.95).ignoresSafeArea()
-
-                      VStack(spacing: 20) {
-                          Image(systemName: "wifi.exclamationmark")
-                              .font(.system(size: 60))
-                              .foregroundColor(.orange)
-
-                          Text("Connection Issue")
-                              .font(.title2)
-                              .fontWeight(.bold)
-                              .foregroundColor(.white)
-
-                          Text(error)
+                          Text(manager.status)
                               .font(.subheadline)
                               .foregroundColor(.gray)
                               .multilineTextAlignment(.center)
-                              .padding(.horizontal, 32)
+                              .padding(.horizontal)
 
-                          Text("If you opened before, cached files may still work.\nTry retry or check internet.")
-                              .font(.caption)
-                              .foregroundColor(.gray.opacity(0.7))
-                              .multilineTextAlignment(.center)
+                          if manager.downloadingFile != nil {
+                              VStack(spacing: 8) {
+                                  Text(manager.downloadingFile!)
+                                      .font(.caption)
+                                      .foregroundColor(.blue)
+                                      .lineLimit(1)
 
-                          Button(action: onRetry) {
-                              HStack {
-                                  Image(systemName: "arrow.clockwise")
-                                  Text("Retry")
+                                  ProgressView(value: manager.downloadProgress)
+                                      .progressViewStyle(LinearProgressViewStyle(tint: .blue))
+                                      .frame(width: 280)
+
+                                  Text("\(Int(manager.downloadProgress * 100))%  •  \(manager.cachedCount) files cached")
+                                      .font(.caption2)
+                                      .foregroundColor(.gray)
                               }
-                              .padding(.horizontal, 40)
-                              .padding(.vertical, 12)
+                          } else if manager.cachedCount > 0 {
+                              Text("\(manager.cachedCount) files cached")
+                                  .font(.caption)
+                                  .foregroundColor(.green)
                           }
-                          .background(Color.blue)
-                          .foregroundColor(.white)
-                          .cornerRadius(10)
+
+                          if let error = manager.errorMessage {
+                              Text(error)
+                                  .font(.caption)
+                                  .foregroundColor(.red)
+                                  .multilineTextAlignment(.center)
+                                  .padding(.horizontal, 32)
+
+                              Button("Retry") {
+                                  manager.retry()
+                              }
+                              .padding(.horizontal, 32)
+                              .padding(.vertical, 10)
+                              .background(Color.blue)
+                              .foregroundColor(.white)
+                              .cornerRadius(8)
+                          }
+
+                          Spacer()
+
+                          Text("Files download on-demand with original names\nHTML • JS • WASM • DATA • PNG")
+                              .font(.caption2)
+                              .foregroundColor(.gray.opacity(0.6))
+                              .multilineTextAlignment(.center)
                       }
                   }
               }
           }
 
-          // MARK: - WebView Model
+          // ═══════════════════════════════════════════════════════════════
+          // SERVER MANAGER
+          // ═══════════════════════════════════════════════════════════════
           @MainActor
-          class WebViewModel: ObservableObject {
-              @Published var isLoading = true
-              @Published var loadProgress: Double = 0
-              @Published var loadError: String?
+          class ServerManager: ObservableObject {
+              @Published var isReady = false
+              @Published var status = "Starting local server..."
+              @Published var downloadProgress: Double = 0
+              @Published var downloadingFile: String?
+              @Published var cachedCount = 0
+              @Published var errorMessage: String?
 
-              let editorURL = "${{ github.event.inputs.editor_url || 'https://editor.godotengine.org/' }}"
+              private var server: LocalHTTPServer?
 
-              func reload() {
-                  loadError = nil
-                  isLoading = true
-                  loadProgress = 0
-                  NotificationCenter.default.post(name: .init("reloadWebView"), object: nil)
+              var cacheDir: URL {
+                  FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                      .appendingPathComponent("godot_editor_files", isDirectory: true)
+              }
+
+              func start() {
+                  do {
+                      try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+                      updateCachedCount()
+
+                      let s = LocalHTTPServer(
+                          rootPath: cacheDir.path,
+                          baseURL: BASE_URL,
+                          onDownloadStart: { [weak self] file in
+                              DispatchQueue.main.async {
+                                  self?.downloadingFile = file
+                                  self?.downloadProgress = 0
+                              }
+                          },
+                          onDownloadProgress: { [weak self] progress in
+                              DispatchQueue.main.async {
+                                  self?.downloadProgress = progress
+                              }
+                          },
+                          onDownloadComplete: { [weak self] in
+                              DispatchQueue.main.async {
+                                  self?.downloadingFile = nil
+                                  self?.updateCachedCount()
+                              }
+                          },
+                          onStatusUpdate: { [weak self] msg in
+                              DispatchQueue.main.async {
+                                  self?.status = msg
+                              }
+                          }
+                      )
+
+                      if s.start() {
+                          self.server = s
+                          self.status = "Server ready! Loading editor..."
+                          self.isReady = true
+                      } else {
+                          self.errorMessage = "Failed to start local server"
+                      }
+                  } catch {
+                      self.errorMessage = "Error: \(error.localizedDescription)"
+                  }
+              }
+
+              func retry() {
+                  errorMessage = nil
+                  isReady = false
+                  start()
+              }
+
+              private func updateCachedCount() {
+                  if let contents = try? FileManager.default.contentsOfDirectory(atPath: cacheDir.path) {
+                      cachedCount = contents.filter { !$0.hasPrefix(".") }.count
+                  }
               }
           }
 
-          // MARK: - WebView
-          struct WebView: UIViewRepresentable {
-              @ObservedObject var model: WebViewModel
+          // ═══════════════════════════════════════════════════════════════
+          // EDITOR WEBVIEW
+          // ═══════════════════════════════════════════════════════════════
+          struct EditorWebView: UIViewRepresentable {
+              let serverManager: ServerManager
 
               func makeUIView(context: Context) -> WKWebView {
                   let cfg = WKWebViewConfiguration()
-
-                  // Persistent data store for caching
                   cfg.websiteDataStore = WKWebsiteDataStore.default()
-
                   cfg.preferences.javaScriptCanOpenWindowsAutomatically = true
                   cfg.allowsInlineMediaPlayback = true
                   cfg.mediaTypesRequiringUserActionForPlayback = []
@@ -194,8 +253,8 @@ jobs:
                       cfg.defaultWebpagePreferences = p
                   }
 
-                  // Inject console bridge + viewport fix
-                  let bridge = JSBridge(model: model)
+                  // Console bridge
+                  let bridge = JSBridge()
                   cfg.userContentController.add(bridge, name: "iosLog")
 
                   let fixScript = """
@@ -221,7 +280,7 @@ jobs:
                       style.textContent = 'html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; } canvas { display: block; }';
                       document.head.appendChild(style);
 
-                      console.log('GODOT-iOS: Online editor loaded');
+                      console.log('GODOT-iOS: Local server mode active');
                   })();
                   """
                   cfg.userContentController.addUserScript(
@@ -229,7 +288,6 @@ jobs:
                   )
 
                   let wv = WKWebView(frame: .zero, configuration: cfg)
-
                   wv.scrollView.bounces = true
                   wv.scrollView.alwaysBounceVertical = false
                   wv.scrollView.alwaysBounceHorizontal = false
@@ -238,7 +296,6 @@ jobs:
                   wv.scrollView.maximumZoomScale = 3.0
                   wv.scrollView.isScrollEnabled = true
                   wv.scrollView.pinchGestureRecognizer?.isEnabled = true
-
                   wv.backgroundColor = .black
                   wv.isOpaque = true
                   wv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -248,17 +305,10 @@ jobs:
                   }
 
                   wv.navigationDelegate = context.coordinator
-                  wv.uiDelegate = context.coordinator
 
-                  // Observe progress
-                  wv.addObserver(context.coordinator, forKeyPath: #keyPath(WKWebView.estimatedProgress), options: .new, context: nil)
-                  wv.addObserver(context.coordinator, forKeyPath: #keyPath(WKWebView.isLoading), options: .new, context: nil)
-
-                  // Load the online editor
-                  if let url = URL(string: model.editorURL) {
-                      var request = URLRequest(url: url)
-                      request.cachePolicy = .returnCacheDataElseLoad
-                      wv.load(request)
+                  // Load from LOCAL server
+                  if let url = URL(string: "http://127.0.0.1:\(SERVER_PORT)/") {
+                      wv.load(URLRequest(url: url))
                   }
 
                   return wv
@@ -267,81 +317,310 @@ jobs:
               func updateUIView(_ uiView: WKWebView, context: Context) {}
 
               func makeCoordinator() -> Coordinator {
-                  Coordinator(model: model)
+                  Coordinator()
               }
 
-              class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
-                  let model: WebViewModel
-
-                  init(model: WebViewModel) {
-                      self.model = model
-                      super.init()
-                      NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .init("reloadWebView"), object: nil)
-                  }
-
-                  @objc func reload() {
-                      // Handled by view update
-                  }
-
-                  override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
-                      guard let wv = object as? WKWebView else { return }
-
-                      if keyPath == #keyPath(WKWebView.estimatedProgress) {
-                          DispatchQueue.main.async {
-                              self.model.loadProgress = wv.estimatedProgress
-                          }
-                      }
-                      if keyPath == #keyPath(WKWebView.isLoading) {
-                          DispatchQueue.main.async {
-                              self.model.isLoading = wv.isLoading
-                          }
-                      }
-                  }
-
-                  func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-                      DispatchQueue.main.async {
-                          self.model.isLoading = false
-                          self.model.loadError = nil
-                      }
-                      print("[WEBVIEW] Loaded: \(webView.url?.absoluteString ?? "unknown")")
-                  }
-
-                  func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-                      DispatchQueue.main.async {
-                          self.model.loadError = error.localizedDescription
-                      }
-                      print("[WEBVIEW] Fail: \(error)")
-                  }
-
+              class Coordinator: NSObject, WKNavigationDelegate {
                   func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-                      DispatchQueue.main.async {
-                          self.model.loadError = error.localizedDescription
-                      }
                       print("[WEBVIEW] Provisional fail: \(error)")
                   }
-
-                  func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-                      if let resp = navigationResponse.response as? HTTPURLResponse {
-                          let contentLength = resp.value(forHTTPHeaderField: "Content-Length")
-                          print("[CACHE] \(resp.url?.lastPathComponent ?? "?") | Status: \(resp.statusCode) | Size: \(contentLength ?? "?") bytes")
-                      }
-                      decisionHandler(.allow)
+                  func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+                      print("[WEBVIEW] Loaded: \(webView.url?.absoluteString ?? "?")")
                   }
               }
           }
 
-          // MARK: - JS Bridge
+          // ═══════════════════════════════════════════════════════════════
+          // JS BRIDGE
+          // ═══════════════════════════════════════════════════════════════
           final class JSBridge: NSObject, WKScriptMessageHandler {
-              weak var model: WebViewModel?
-
-              init(model: WebViewModel) {
-                  self.model = model
-              }
-
               func userContentController(_ ucc: WKUserContentController, didReceive msg: WKScriptMessage) {
                   if let body = msg.body as? String {
                       print("[GODOT] \(body)")
                   }
+              }
+          }
+
+          // ═══════════════════════════════════════════════════════════════
+          // LOCAL HTTP SERVER (with on-demand download)
+          // ═══════════════════════════════════════════════════════════════
+          final class LocalHTTPServer: NSObject {
+              private var listener: NWListener?
+              private let root: String
+              private let baseURL: String
+              private var ready = false
+
+              private let onDownloadStart: ((String) -> Void)?
+              private let onDownloadProgress: ((Double) -> Void)?
+              private let onDownloadComplete: (() -> Void)?
+              private let onStatusUpdate: ((String) -> Void)?
+
+              private var activeDownloads = Set<String>()
+              private let downloadQueue = DispatchQueue(label: "download.queue", qos: .userInitiated)
+
+              init(rootPath: String,
+                   baseURL: String,
+                   onDownloadStart: ((String) -> Void)? = nil,
+                   onDownloadProgress: ((Double) -> Void)? = nil,
+                   onDownloadComplete: (() -> Void)? = nil,
+                   onStatusUpdate: ((String) -> Void)? = nil) {
+                  self.root = rootPath
+                  self.baseURL = baseURL.hasSuffix("/") ? baseURL : baseURL + "/"
+                  self.onDownloadStart = onDownloadStart
+                  self.onDownloadProgress = onDownloadProgress
+                  self.onDownloadComplete = onDownloadComplete
+                  self.onStatusUpdate = onStatusUpdate
+              }
+
+              func start() -> Bool {
+                  do {
+                      let params = NWParameters.tcp
+                      listener = try NWListener(using: params, on: NWEndpoint.Port(integerLiteral: SERVER_PORT))
+
+                      listener?.stateUpdateHandler = { [weak self] state in
+                          switch state {
+                          case .ready:
+                              self?.ready = true
+                              print("[SERVER] Ready on port \(SERVER_PORT)")
+                          case .failed(let err):
+                              print("[SERVER] Failed: \(err)")
+                          case .cancelled:
+                              print("[SERVER] Cancelled")
+                          default: break
+                          }
+                      }
+
+                      listener?.newConnectionHandler = { [weak self] conn in
+                          self?.handleConnection(conn)
+                      }
+
+                      listener?.start(queue: .global())
+
+                      for _ in 0..<50 {
+                          if ready { break }
+                          usleep(100000)
+                      }
+                      return ready
+                  } catch {
+                      print("[SERVER] Start error: \(error)")
+                      return false
+                  }
+              }
+
+              // MARK: - Connection Handling
+
+              private func handleConnection(_ connection: NWConnection) {
+                  connection.start(queue: .global())
+                  readHTTP(connection: connection, buffer: Data())
+              }
+
+              private func readHTTP(connection: NWConnection, buffer: Data) {
+                  connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, error in
+                      guard let self = self else { connection.cancel(); return }
+
+                      if let error = error {
+                          connection.cancel()
+                          return
+                      }
+
+                      var buf = buffer
+                      if let c = content { buf.append(c) }
+
+                      let sep = Data("\r\n\r\n".utf8)
+                      if let range = buf.range(of: sep) {
+                          let headerBytes = buf.subdata(in: 0..<range.upperBound)
+                          if let requestText = String(data: headerBytes, encoding: .utf8) {
+                              self.handleRequest(connection: connection, request: requestText)
+                              return
+                          }
+                      }
+
+                      if isComplete {
+                          connection.cancel()
+                      } else {
+                          self.readHTTP(connection: connection, buffer: buf)
+                      }
+                  }
+              }
+
+              private func handleRequest(connection: NWConnection, request: String) {
+                  let lines = request.split(separator: "\r\n")
+                  guard let first = lines.first else {
+                      sendHTTP(connection: connection, status: 400, body: Data())
+                      return
+                  }
+
+                  let parts = first.split(separator: " ")
+                  guard parts.count >= 2 else {
+                      sendHTTP(connection: connection, status: 400, body: Data())
+                      return
+                  }
+
+                  let rawPath = String(parts[1])
+                  let path = rawPath == "/" ? "/" + self.entryHTML : rawPath
+                  let fileName = (path as NSString).lastPathComponent
+
+                  let filePath = (root + path).replacingOccurrences(of: "..", with: "")
+                  let stdPath = (filePath as NSString).standardizingPath
+                  let stdRoot = (root as NSString).standardizingPath
+
+                  guard stdPath.hasPrefix(stdRoot) else {
+                      sendHTTP(connection: connection, status: 403, body: Data())
+                      return
+                  }
+
+                  // Check if file exists locally
+                  if FileManager.default.fileExists(atPath: stdPath),
+                     let data = FileManager.default.contents(atPath: stdPath) {
+                      // Serve from cache
+                      print("[SERVER] 200 CACHE \(path) (\(data.count) bytes)")
+                      self.serveData(connection: connection, data: data, path: path)
+                      return
+                  }
+
+                  // Need to download
+                  downloadQueue.async { [weak self] in
+                      guard let self = self else { return }
+
+                      // Prevent duplicate downloads
+                      if self.activeDownloads.contains(fileName) {
+                          // Wait for existing download
+                          var attempts = 0
+                          while self.activeDownloads.contains(fileName) && attempts < 100 {
+                              usleep(100000)
+                              attempts += 1
+                          }
+                          // Try serving again
+                          if let data = FileManager.default.contents(atPath: stdPath) {
+                              self.serveData(connection: connection, data: data, path: path)
+                              return
+                          }
+                      }
+
+                      self.activeDownloads.insert(fileName)
+
+                      DispatchQueue.main.async {
+                          self.onDownloadStart?(fileName)
+                          self.onStatusUpdate?("Downloading \(fileName)...")
+                      }
+
+                      let remoteURL = self.baseURL + (path.hasPrefix("/") ? String(path.dropFirst()) : path)
+
+                      guard let url = URL(string: remoteURL) else {
+                          self.activeDownloads.remove(fileName)
+                          self.sendHTTP(connection: connection, status: 404, body: Data())
+                          return
+                      }
+
+                      let semaphore = DispatchSemaphore(value: 0)
+                      var downloadedData: Data?
+
+                      let task = URLSession.shared.dataTask(with: url) { data, response, error in
+                          downloadedData = data
+                          semaphore.signal()
+                      }
+                      task.resume()
+                      semaphore.wait()
+
+                      self.activeDownloads.remove(fileName)
+
+                      guard let data = downloadedData, !data.isEmpty else {
+                          DispatchQueue.main.async {
+                              self.onStatusUpdate?("Failed to download \(fileName)")
+                          }
+                          self.sendHTTP(connection: connection, status: 502, body: Data())
+                          return
+                      }
+
+                      // Save to cache
+                      do {
+                          let dir = (stdPath as NSString).deletingLastPathComponent
+                          try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+                          try data.write(to: URL(fileURLWithPath: stdPath))
+                          print("[SERVER] SAVED \(path) (\(data.count) bytes)")
+                      } catch {
+                          print("[SERVER] Save error: \(error)")
+                      }
+
+                      DispatchQueue.main.async {
+                          self.onDownloadComplete?()
+                          self.onStatusUpdate?("Ready")
+                      }
+
+                      self.serveData(connection: connection, data: data, path: path)
+                  }
+              }
+
+              private func serveData(connection: NWConnection, data: Data, path: String) {
+                  let ext = ((path as NSString).pathExtension as String).lowercased()
+                  let mime = mimeFor(ext: ext)
+
+                  var header = "HTTP/1.1 200 OK\r\n"
+                  header += "Content-Type: " + mime + "\r\n"
+                  header += "Content-Length: " + String(data.count) + "\r\n"
+                  header += "Cross-Origin-Opener-Policy: same-origin\r\n"
+                  header += "Cross-Origin-Embedder-Policy: require-corp\r\n"
+                  header += "Access-Control-Allow-Origin: *\r\n"
+                  header += "Connection: close\r\n"
+                  header += "\r\n"
+
+                  guard let headerData = header.data(using: .utf8) else {
+                      connection.cancel()
+                      return
+                  }
+
+                  connection.send(content: headerData, completion: .contentProcessed { _ in
+                      connection.send(content: data, completion: .contentProcessed { _ in
+                          connection.cancel()
+                      })
+                  })
+              }
+
+              private func sendHTTP(connection: NWConnection, status: Int, body: Data) {
+                  var header = "HTTP/1.1 " + String(status) + " "
+                  header += (status == 404 ? "Not Found" : (status == 403 ? "Forbidden" : (status == 502 ? "Bad Gateway" : "Error")))
+                  header += "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+                  if let data = header.data(using: .utf8) {
+                      connection.send(content: data, completion: .contentProcessed { _ in
+                          connection.cancel()
+                      })
+                  }
+              }
+
+              private func mimeFor(ext: String) -> String {
+                  switch ext {
+                  case "html", "htm": return "text/html; charset=utf-8"
+                  case "js", "mjs": return "application/javascript; charset=utf-8"
+                  case "wasm": return "application/wasm"
+                  case "json": return "application/json"
+                  case "css": return "text/css"
+                  case "png": return "image/png"
+                  case "jpg", "jpeg": return "image/jpeg"
+                  case "svg": return "image/svg+xml"
+                  case "ico": return "image/x-icon"
+                  case "woff2": return "font/woff2"
+                  case "woff": return "font/woff"
+                  case "ttf": return "font/ttf"
+                  case "otf": return "font/otf"
+                  case "data", "bin", "pck": return "application/octet-stream"
+                  case "zip": return "application/zip"
+                  case "xml": return "application/xml"
+                  case "txt": return "text/plain"
+                  default: return "application/octet-stream"
+                  }
+              }
+
+              private var entryHTML: String {
+                  let candidates = ["godot.editor.html", "godot.web.editor.html", "godot.html", "index.html"]
+                  for candidate in candidates {
+                      let path = root + "/" + candidate
+                      if FileManager.default.fileExists(atPath: path) {
+                          return candidate
+                      }
+                  }
+                  // If none cached, try downloading godot.editor.html first
+                  return "godot.editor.html"
               }
           }
           SWIFTEOF
@@ -354,7 +633,7 @@ jobs:
               <key>CFBundleDevelopmentRegion</key><string>en</string>
               <key>CFBundleDisplayName</key><string>Godot Editor</string>
               <key>CFBundleExecutable</key><string>GodotWebEditor</string>
-              <key>CFBundleIdentifier</key><string>com.godot.webeditor.online</string>
+              <key>CFBundleIdentifier</key><string>com.godot.webeditor.ondemand</string>
               <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
               <key>CFBundleName</key><string>GodotWebEditor</string>
               <key>CFBundlePackageType</key><string>APPL</string>
@@ -404,7 +683,7 @@ jobs:
                                           <color key="textColor" red="0.93725490570000003" green="0.93725490570000003" blue="0.95686274770000002" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                                           <nil key="highlightedColor"/>
                                       </label>
-                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Online • Auto-Cache • WebGL" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
+                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="On-Demand • Original Names • Auto-Cache" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
                                           <rect key="frame" x="0.0" y="314.66666666666669" width="393" height="21"/>
                                           <fontDescription key="fontDescription" type="system" pointSize="15"/>
                                           <color key="textColor" red="0.5803921569" green="0.5960784314" blue="0.6392156863" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
@@ -451,7 +730,7 @@ jobs:
           settings:
             MARKETING_VERSION: "1.0.0"
             CURRENT_PROJECT_VERSION: "1"
-            PRODUCT_BUNDLE_IDENTIFIER: com.godot.webeditor.online
+            PRODUCT_BUNDLE_IDENTIFIER: com.godot.webeditor.ondemand
             SWIFT_VERSION: "5.9"
             IPHONEOS_DEPLOYMENT_TARGET: "15.0"
             TARGETED_DEVICE_FAMILY: "1,2"
@@ -519,7 +798,7 @@ jobs:
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
           rm -rf Payload/GodotWebEditor.app/_CodeSignature 2>/dev/null || true
-          IPA_NAME="GodotWebEditor_Online_Light_unsigned.ipa"
+          IPA_NAME="GodotWebEditor_OnDemand_unsigned.ipa"
           zip -qr "$IPA_NAME" Payload
           rm -rf Payload
           echo "IPA_NAME=$IPA_NAME" >> "$GITHUB_ENV"
@@ -528,19 +807,19 @@ jobs:
       - name: ⬆️ Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: godot-web-editor-online-light
-          path: GodotWebEditor_Online_Light_unsigned.ipa
+          name: godot-web-editor-ondemand
+          path: GodotWebEditor_OnDemand_unsigned.ipa
           retention-days: 30
 
       - name: ✅ Done
         run: |
           echo ""
           echo "╔══════════════════════════════════════════════════════╗"
-          echo "║  🎉 ULTRA LIGHT IPA BUILD COMPLETE                   ║"
+          echo "║  🎉 ON-DEMAND IPA BUILD COMPLETE                     ║"
           echo "╠══════════════════════════════════════════════════════╣"
           echo "║  📁 File: ${{ env.IPA_NAME }}                          ║"
-          echo "║  📱 Size: ~2-3 MB (no bundled Godot files)           ║"
-          echo "║  🌐 Loads: ${{ github.event.inputs.editor_url || 'https://editor.godotengine.org/' }}"
-          echo "║  💾 Auto-caches all files in background              ║"
+          echo "║  📱 Size: ~2-3 MB (files download on-demand)         ║"
+          echo "║  🌐 Source: ${{ github.event.inputs.base_url || 'https://editor.godotengine.org/' }}"
+          echo "║  💾 Original filenames preserved in cache            ║"
           echo "║  📱 Install: AltStore / Sideloadly / Scarlet         ║"
           echo "╚══════════════════════════════════════════════════════╝"
