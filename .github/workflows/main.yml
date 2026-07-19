@@ -68,14 +68,12 @@ jobs:
           unzip -q web_editor.zip || { echo "❌ Bad ZIP"; exit 1; }
           rm -f web_editor.zip
 
-          # Flatten if inside a subdirectory
           SUBDIR=$(find . -maxdepth 1 -type d | grep -v '^\.$' | head -n 1)
           if [ -n "$SUBDIR" ] && [ -d "$SUBDIR" ]; then
             mv "$SUBDIR"/* . 2>/dev/null || true
             rmdir "$SUBDIR" 2>/dev/null || true
           fi
 
-          # Rename main HTML to index.html
           for f in godot.editor.html godot.web.editor.html godot.html; do
             if [ -f "$f" ] && [ "$f" != "index.html" ]; then
               mv "$f" index.html
@@ -84,21 +82,24 @@ jobs:
             fi
           done
 
-          # 🔁 Handle Godot 4.4+ wasm naming (godot.editor.wasm → godot.editor.wasm32.wasm)
-          if [ -f godot.editor.wasm ] && [ ! -f godot.editor.wasm32.wasm ]; then
-            mv godot.editor.wasm godot.editor.wasm32.wasm
-            echo "📝 Renamed godot.editor.wasm → godot.editor.wasm32.wasm"
-          fi
-
-          echo "✅ Files inside godot_editor:"
-          ls -la
-
           if [ ! -f index.html ]; then
-            echo "❌ No index.html! Aborting."
+            echo "❌ No index.html! Files:"
+            ls -la
             exit 1
           fi
 
           echo "✅ Ready: $(du -sh . | cut -f1), $(find . -type f | wc -l) files"
+
+          # ── NEW: Duplicate godot.editor.wasm → godot.editor.wasm32.wasm ──
+          if [ -f godot.editor.wasm ]; then
+            cp godot.editor.wasm godot.editor.wasm32.wasm
+            echo "✅ Duplicated: godot.editor.wasm → godot.editor.wasm32.wasm"
+          else
+            echo "⚠️ Warning: godot.editor.wasm not found, skipping duplication"
+          fi
+          # ────────────────────────────────────────────────────────────
+
+          ls -la
           cd ..
 
       - name: 5Create iOS App
@@ -120,322 +121,344 @@ jobs:
           import Foundation
 
           final class LocalHTTPServer: NSObject {
-              private var listener: NWListener?
-              private let root: String
-              private var ready = false
+            private var listener: NWListener?
+            private let root: String
+            private var ready = false
 
-              init(rootPath: String) {
-                  self.root = rootPath
+            init(rootPath: String) {
+              self.root = rootPath
+            }
+
+            func start() -> Bool {
+              do {
+                let params = NWParameters.tcp
+                listener = try NWListener(using: params, on: NWEndpoint.Port(integerLiteral: 8765))
+
+                listener?.stateUpdateHandler = { [weak self] state in
+                  switch state {
+                  case .ready:
+                    self?.ready = true
+                    print("[SERVER] Ready on port 8765")
+                  case .failed(let err):
+                    print("[SERVER] Failed: \(err)")
+                  case .cancelled:
+                    print("[SERVER] Cancelled")
+                  default: break
+                  }
+                }
+
+                listener?.newConnectionHandler = { [weak self] conn in
+                  self?.handleConnection(conn)
+                }
+
+                listener?.start(queue: .global())
+
+                for _ in 0..<30 {
+                  if ready { break }
+                  usleep(100000)
+                }
+                return ready
+              } catch {
+                print("[SERVER] Start error: \(error)")
+                return false
+              }
+            }
+
+            private func handleConnection(_ connection: NWConnection) {
+              connection.start(queue: .global())
+              readHTTP(connection: connection, buffer: Data())
+            }
+
+            private func readHTTP(connection: NWConnection, buffer: Data) {
+              connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, error in
+                guard let self = self else { connection.cancel(); return }
+
+                if let error = error {
+                  print("[SERVER] Recv error: \(error)")
+                  connection.cancel()
+                  return
+                }
+
+                var buf = buffer
+                if let c = content { buf.append(c) }
+
+                let sep = Data("\r\n\r\n".utf8)
+                if let range = buf.range(of: sep) {
+                  let headerBytes = buf.subdata(in: 0..<range.upperBound)
+                  let bodyBytes = buf.subdata(in: range.upperBound..<buf.count)
+
+                  if let requestText = String(data: headerBytes, encoding: .utf8) {
+                    self.serve(connection: connection, request: requestText, bodyData: bodyBytes)
+                    return
+                  }
+                }
+
+                if isComplete {
+                  connection.cancel()
+                } else {
+                  self.readHTTP(connection: connection, buffer: buf)
+                }
+              }
+            }
+
+            private func serve(connection: NWConnection, request: String, bodyData: Data) {
+              let lines = request.split(separator: "\r\n")
+              guard let first = lines.first else {
+                sendHTTP(connection: connection, status: 400, body: Data())
+                return
               }
 
-              func start() -> Bool {
-                  do {
-                      let params = NWParameters.tcp
-                      listener = try NWListener(using: params, on: NWEndpoint.Port(integerLiteral: 8765))
-
-                      listener?.stateUpdateHandler = { [weak self] state in
-                          switch state {
-                          case .ready:
-                              self?.ready = true
-                              print("[SERVER] Ready on port 8765")
-                          case .failed(let err):
-                              print("[SERVER] Failed: \(err)")
-                          case .cancelled:
-                              print("[SERVER] Cancelled")
-                          default: break
-                          }
-                      }
-
-                      listener?.newConnectionHandler = { [weak self] conn in
-                          self?.handleConnection(conn)
-                      }
-
-                      listener?.start(queue: .global())
-
-                      for _ in 0..<30 {
-                          if ready { break }
-                          usleep(100000)
-                      }
-                      return ready
-                  } catch {
-                      print("[SERVER] Start error: \(error)")
-                      return false
-                  }
+              let parts = first.split(separator: " ")
+              guard parts.count >= 2 else {
+                sendHTTP(connection: connection, status: 400, body: Data())
+                return
               }
 
-              private func handleConnection(_ connection: NWConnection) {
-                  connection.start(queue: .global())
-                  readHTTP(connection: connection, buffer: Data())
+              let rawPath = String(parts[1])
+              let path = rawPath == "/" ? "/index.html" : rawPath
+
+              let filePath = (root + path).replacingOccurrences(of: "..", with: "")
+              let stdPath = (filePath as NSString).standardizingPath
+              let stdRoot = (root as NSString).standardizingPath
+
+              guard stdPath.hasPrefix(stdRoot) else {
+                sendHTTP(connection: connection, status: 403, body: Data())
+                return
               }
 
-              private func readHTTP(connection: NWConnection, buffer: Data) {
-                  connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, error in
-                      guard let self = self else { connection.cancel(); return }
-
-                      if let error = error {
-                          print("[SERVER] Recv error: \(error)")
-                          connection.cancel()
-                          return
-                      }
-
-                      var buf = buffer
-                      if let c = content { buf.append(c) }
-
-                      let sep = Data("\r\n\r\n".utf8)
-                      if let range = buf.range(of: sep) {
-                          let headerBytes = buf.subdata(in: 0..<range.upperBound)
-                          let bodyBytes = buf.subdata(in: range.upperBound..<buf.count)
-
-                          if let requestText = String(data: headerBytes, encoding: .utf8) {
-                              self.serve(connection: connection, request: requestText, bodyData: bodyBytes)
-                              return
-                          }
-                      }
-
-                      if isComplete {
-                          connection.cancel()
-                      } else {
-                          self.readHTTP(connection: connection, buffer: buf)
-                      }
-                  }
+              guard FileManager.default.fileExists(atPath: stdPath),
+                    let data = FileManager.default.contents(atPath: stdPath) else {
+                print("[SERVER] 404: \(path)")
+                sendHTTP(connection: connection, status: 404, body: Data())
+                return
               }
 
-              private func serve(connection: NWConnection, request: String, bodyData: Data) {
-                  let lines = request.split(separator: "\r\n")
-                  guard let first = lines.first else {
-                      sendHTTP(connection: connection, status: 400, body: Data())
-                      return
-                  }
+              let ext = (stdPath as NSString).pathExtension.lowercased()
+              let mime = mimeFor(ext: ext)
 
-                  let parts = first.split(separator: " ")
-                  guard parts.count >= 2 else {
-                      sendHTTP(connection: connection, status: 400, body: Data())
-                      return
-                  }
+              print("[SERVER] 200 \(path) (\(data.count) bytes)")
 
-                  let rawPath = String(parts[1])
-                  let path = rawPath == "/" ? "/index.html" : rawPath
+              var header = "HTTP/1.1 200 OK\r\n"
+              header += "Content-Type: " + mime + "\r\n"
+              header += "Content-Length: " + String(data.count) + "\r\n"
+              header += "Cross-Origin-Opener-Policy: same-origin\r\n"
+              header += "Cross-Origin-Embedder-Policy: require-corp\r\n"
+              header += "Access-Control-Allow-Origin: *\r\n"
+              header += "Connection: close\r\n"
+              header += "\r\n"
 
-                  let filePath = (root + path).replacingOccurrences(of: "..", with: "")
-                  let stdPath = (filePath as NSString).standardizingPath
-                  let stdRoot = (root as NSString).standardizingPath
-
-                  guard stdPath.hasPrefix(stdRoot) else {
-                      sendHTTP(connection: connection, status: 403, body: Data())
-                      return
-                  }
-
-                  guard FileManager.default.fileExists(atPath: stdPath),
-                        let data = FileManager.default.contents(atPath: stdPath) else {
-                      print("[SERVER] 404: \(path)")
-                      sendHTTP(connection: connection, status: 404, body: Data())
-                      return
-                  }
-
-                  let ext = (stdPath as NSString).pathExtension.lowercased()
-                  let mime = mimeFor(ext: ext)
-
-                  print("[SERVER] 200 \(path) (\(data.count) bytes)")
-
-                  var header = "HTTP/1.1 200 OK\r\n"
-                  header += "Content-Type: " + mime + "\r\n"
-                  header += "Content-Length: " + String(data.count) + "\r\n"
-                  header += "Cross-Origin-Opener-Policy: same-origin\r\n"
-                  header += "Cross-Origin-Embedder-Policy: require-corp\r\n"
-                  header += "Access-Control-Allow-Origin: *\r\n"
-                  header += "Connection: close\r\n"
-                  header += "\r\n"
-
-                  guard let headerData = header.data(using: .utf8) else {
-                      connection.cancel()
-                      return
-                  }
-
-                  connection.send(content: headerData, completion: .contentProcessed { _ in
-                      connection.send(content: data, completion: .contentProcessed { _ in
-                          connection.cancel()
-                      })
-                  })
+              guard let headerData = header.data(using: .utf8) else {
+                connection.cancel()
+                return
               }
 
-              private func sendHTTP(connection: NWConnection, status: Int, body: Data) {
-                  var header = "HTTP/1.1 " + String(status) + " "
-                  header += (status == 404 ? "Not Found" : (status == 403 ? "Forbidden" : "Error"))
-                  header += "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+              connection.send(content: headerData, completion: .contentProcessed { _ in
+                connection.send(content: data, completion: .contentProcessed { _ in
+                  connection.cancel()
+                })
+              })
+            }
 
-                  if let data = header.data(using: .utf8) {
-                      connection.send(content: data, completion: .contentProcessed { _ in
-                          connection.cancel()
-                      })
-                  }
-              }
+            private func sendHTTP(connection: NWConnection, status: Int, body: Data) {
+              var header = "HTTP/1.1 " + String(status) + " "
+              header += (status == 404 ? "Not Found" : (status == 403 ? "Forbidden" : "Error"))
+              header += "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 
-              private func mimeFor(ext: String) -> String {
-                  switch ext {
-                  case "html", "htm": return "text/html; charset=utf-8"
-                  case "js", "mjs": return "application/javascript; charset=utf-8"
-                  case "wasm": return "application/wasm"
-                  case "json": return "application/json"
-                  case "css": return "text/css"
-                  case "png": return "image/png"
-                  case "jpg", "jpeg": return "image/jpeg"
-                  case "svg": return "image/svg+xml"
-                  case "ico": return "image/x-icon"
-                  case "woff2": return "font/woff2"
-                  case "woff": return "font/woff"
-                  case "ttf": return "font/ttf"
-                  case "otf": return "font/otf"
-                  case "data", "bin", "pck": return "application/octet-stream"
-                  case "zip": return "application/zip"
-                  case "xml": return "application/xml"
-                  case "txt": return "text/plain"
-                  default: return "application/octet-stream"
-                  }
+              if let data = header.data(using: .utf8) {
+                connection.send(content: data, completion: .contentProcessed { _ in
+                  connection.cancel()
+                })
               }
+            }
+
+            private func mimeFor(ext: String) -> String {
+              switch ext {
+              case "html", "htm": return "text/html; charset=utf-8"
+              case "js", "mjs": return "application/javascript; charset=utf-8"
+              case "wasm": return "application/wasm"
+              case "json": return "application/json"
+              case "css": return "text/css"
+              case "png": return "image/png"
+              case "jpg", "jpeg": return "image/jpeg"
+              case "svg": return "image/svg+xml"
+              case "ico": return "image/x-icon"
+              case "woff2": return "font/woff2"
+              case "woff": return "font/woff"
+              case "ttf": return "font/ttf"
+              case "otf": return "font/otf"
+              case "data", "bin", "pck": return "application/octet-stream"
+              case "zip": return "application/zip"
+              case "xml": return "application/xml"
+              case "txt": return "text/plain"
+              default: return "application/octet-stream"
+              }
+            }
           }
 
           final class JSBridge: NSObject, WKScriptMessageHandler {
-              func userContentController(_ ucc: WKUserContentController, didReceive msg: WKScriptMessage) {
-                  if let body = msg.body as? String {
-                      print("[GODOT] \(body)")
-                  }
+            func userContentController(_ ucc: WKUserContentController, didReceive msg: WKScriptMessage) {
+              if let body = msg.body as? String {
+                print("[GODOT] \(body)")
               }
+            }
           }
 
           final class NavDebug: NSObject, WKNavigationDelegate {
-              func webView(_ wv: WKWebView, didFinish nav: WKNavigation!) {
-                  print("[WEBVIEW] didFinish")
-              }
-              func webView(_ wv: WKWebView, didFail nav: WKNavigation!, withError err: Error) {
-                  print("[WEBVIEW] didFail: \(err)")
-              }
-              func webView(_ wv: WKWebView, didFailProvisionalNavigation nav: WKNavigation!, withError err: Error) {
-                  print("[WEBVIEW] provisionalFail: \(err)")
-              }
+            func webView(_ wv: WKWebView, didFinish nav: WKNavigation!) {
+              print("[WEBVIEW] didFinish")
+            }
+            func webView(_ wv: WKWebView, didFail nav: WKNavigation!, withError err: Error) {
+              print("[WEBVIEW] didFail: \(err)")
+            }
+            func webView(_ wv: WKWebView, didFailProvisionalNavigation nav: WKNavigation!, withError err: Error) {
+              print("[WEBVIEW] provisionalFail: \(err)")
+            }
           }
 
           @main
           struct GodotWebEditorApp: App {
-              var body: some Scene {
-                  WindowGroup {
-                      EditorView()
-                          .edgesIgnoringSafeArea(.all)
-                  }
+            var body: some Scene {
+              WindowGroup {
+                EditorView()
+                  .edgesIgnoringSafeArea(.all)
               }
+            }
           }
 
           struct EditorView: UIViewRepresentable {
-              func makeUIView(context: Context) -> WKWebView {
-                  let cfg = WKWebViewConfiguration()
+            func makeUIView(context: Context) -> WKWebView {
+              let cfg = WKWebViewConfiguration()
 
-                  cfg.preferences.javaScriptEnabled = true
-                  cfg.preferences.javaScriptCanOpenWindowsAutomatically = true
-                  cfg.allowsInlineMediaPlayback = true
-                  cfg.mediaTypesRequiringUserActionForPlayback = []
-                  cfg.processPool = WKProcessPool()
+              // ═══════════════════════════════════════════════════════
+              // CRITICAL: WebGL + Canvas settings for Godot rendering
+              // ═══════════════════════════════════════════════════════
+              cfg.preferences.javaScriptEnabled = true
+              cfg.preferences.javaScriptCanOpenWindowsAutomatically = true
+              cfg.allowsInlineMediaPlayback = true
+              cfg.mediaTypesRequiringUserActionForPlayback = []
+              cfg.processPool = WKProcessPool()
 
-                  if #available(iOS 15.0, *) {
-                      let p = WKWebpagePreferences()
-                      p.allowsContentJavaScript = true
-                      cfg.defaultWebpagePreferences = p
-                  }
+              if #available(iOS 15.0, *) {
+                let p = WKWebpagePreferences()
+                p.allowsContentJavaScript = true
+                cfg.defaultWebpagePreferences = p
+              }
 
-                  cfg.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+              // Allow file access for IndexedDB
+              cfg.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
 
-                  let bridge = JSBridge()
-                  cfg.userContentController.add(bridge, name: "iosLog")
+              // Console bridge
+              let bridge = JSBridge()
+              cfg.userContentController.add(bridge, name: "iosLog")
 
-                  let fixScript = """
-                  (function(){
-                  var meta = document.createElement('meta');
-                  meta.name = 'viewport';
-                  meta.content = 'width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=3.0, user-scalable=yes';
-                  document.head.appendChild(meta);
+              // ═══════════════════════════════════════════════════════
+              // MINIMAL INJECTION: Only viewport + console + canvas fix
+              // NO touch-to-mouse mapping (Godot handles touch natively)
+              // NO aggressive CSS (breaks WebGL rendering)
+              // ═══════════════════════════════════════════════════════
+              let fixScript = """
+              (function(){
+                // 1. Viewport: allow zoom but start at normal scale
+                var meta = document.createElement('meta');
+                meta.name = 'viewport';
+                meta.content = 'width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=3.0, user-scalable=yes';
+                document.head.appendChild(meta);
 
-                  var ol=console.log, oe=console.error, ow=console.warn;
-                  function send(l,a){
+                // 2. Console bridge
+                var ol=console.log, oe=console.error, ow=console.warn;
+                function send(l,a){
                   try{
-                  window.webkit.messageHandlers.iosLog.postMessage('['+l+'] '+Array.from(a).map(String).join(' '));
+                    window.webkit.messageHandlers.iosLog.postMessage('['+l+'] '+Array.from(a).map(String).join(' '));
                   }catch(e){}
-                  }
-                  console.log=function(){send('LOG',arguments);ol.apply(console,arguments);};
-                  console.error=function(){send('ERR',arguments);oe.apply(console,arguments);};
-                  console.warn=function(){send('WRN',arguments);ow.apply(console,arguments);};
-                  window.onerror=function(m,u,l,c,err){send('FATAL',[m,'at',u+':'+l+':'+c]);return false;};
-                  window.onunhandledrejection=function(e){send('REJ',['Unhandled:',e.reason]);};
+                }
+                console.log=function(){send('LOG',arguments);ol.apply(console,arguments);};
+                console.error=function(){send('ERR',arguments);oe.apply(console,arguments);};
+                console.warn=function(){send('WRN',arguments);ow.apply(console,arguments);};
+                window.onerror=function(m,u,l,c,err){send('FATAL',[m,'at',u+':'+l+':'+c]);return false;};
+                window.onunhandledrejection=function(e){send('REJ',['Unhandled:',e.reason]);};
 
-                  var origGetContext = HTMLCanvasElement.prototype.getContext;
-                  HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+                // 3. Monitor canvas creation and log WebGL status
+                var origGetContext = HTMLCanvasElement.prototype.getContext;
+                HTMLCanvasElement.prototype.getContext = function(type, attrs) {
                   var ctx = origGetContext.call(this, type, attrs);
                   if (type === 'webgl2' || type === 'webgl') {
-                  console.log('Canvas WebGL context created:', type);
+                    console.log('Canvas WebGL context created:', type);
                   }
                   return ctx;
-                  };
+                };
 
-                  var style = document.createElement('style');
-                  style.textContent = 'html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; } #canvas, canvas { display: block; }';
-                  document.head.appendChild(style);
+                // 4. Fix: Ensure canvas stays visible when Godot resizes it
+                // Godot sets canvas.style.width/height via JS. We must NOT override.
+                // Only fix: ensure the canvas container has proper size
+                var style = document.createElement('style');
+                style.textContent = `
+                  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+                  #canvas, canvas { display: block; }
+                `;
+                document.head.appendChild(style);
 
-                  console.log('GODOT-iOS: Minimal fix loaded.');
-                  console.log('crossOriginIsolated:', window.crossOriginIsolated);
-                  })();
-                  """
-                  cfg.userContentController.addUserScript(
-                      WKUserScript(source: fixScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
-                  )
+                console.log('GODOT-iOS: Minimal fix loaded. Godot handles touch natively.');
+                console.log('crossOriginIsolated:', window.crossOriginIsolated);
+              })();
+              """
+              cfg.userContentController.addUserScript(
+                WKUserScript(source: fixScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+              )
 
-                  let wv = WKWebView(frame: .zero, configuration: cfg)
-                  wv.scrollView.bounces = true
-                  wv.scrollView.alwaysBounceVertical = false
-                  wv.scrollView.alwaysBounceHorizontal = false
-                  wv.scrollView.bouncesZoom = true
-                  wv.scrollView.minimumZoomScale = 0.5
-                  wv.scrollView.maximumZoomScale = 3.0
-                  wv.scrollView.isScrollEnabled = true
-                  wv.scrollView.pinchGestureRecognizer?.isEnabled = true
+              let wv = WKWebView(frame: .zero, configuration: cfg)
 
-                  wv.backgroundColor = .black
-                  wv.isOpaque = true
-                  wv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+              // Zoom settings
+              wv.scrollView.bounces = true
+              wv.scrollView.alwaysBounceVertical = false
+              wv.scrollView.alwaysBounceHorizontal = false
+              wv.scrollView.bouncesZoom = true
+              wv.scrollView.minimumZoomScale = 0.5
+              wv.scrollView.maximumZoomScale = 3.0
+              wv.scrollView.isScrollEnabled = true
+              wv.scrollView.pinchGestureRecognizer?.isEnabled = true
 
-                  if #available(iOS 16.4, *) {
-                      wv.isInspectable = true
-                  }
+              wv.backgroundColor = .black
+              wv.isOpaque = true
+              wv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
 
-                  let nav = NavDebug()
-                  wv.navigationDelegate = nav
-                  context.coordinator.nav = nav
-
-                  let godotPath = Bundle.main.bundlePath + "/godot_editor"
-                  let server = LocalHTTPServer(rootPath: godotPath)
-
-                  if server.start() {
-                      context.coordinator.server = server
-                      print("[APP] Server started, loading editor...")
-                      usleep(300000)
-
-                      if let url = URL(string: "http://127.0.0.1:8765/index.html") {
-                          wv.load(URLRequest(url: url))
-                      }
-                  } else {
-                      print("[APP] Server failed!")
-                      wv.loadHTMLString("<html><body style=\"background:#000;color:#f00;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;\"><div style=\"text-align:center\"><h1>Server Error</h1><p>Could not start HTTP server</p></div></body></html>", baseURL: nil)
-                  }
-
-                  return wv
+              if #available(iOS 16.4, *) {
+                wv.isInspectable = true
               }
 
-              func updateUIView(_ uiView: WKWebView, context: Context) {}
+              let nav = NavDebug()
+              wv.navigationDelegate = nav
+              context.coordinator.nav = nav
 
-              func makeCoordinator() -> Coordinator {
-                  Coordinator()
+              // Start HTTP server
+              let godotPath = Bundle.main.bundlePath + "/godot_editor"
+              let server = LocalHTTPServer(rootPath: godotPath)
+
+              if server.start() {
+                context.coordinator.server = server
+                print("[APP] Server started, loading editor...")
+                usleep(300000)
+
+                if let url = URL(string: "http://127.0.0.1:8765/index.html") {
+                  wv.load(URLRequest(url: url))
+                }
+              } else {
+                print("[APP] Server failed!")
+                wv.loadHTMLString("<html><body style=\"background:#000;color:#f00;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;\"><div style=\"text-align:center\"><h1>Server Error</h1><p>Could not start HTTP server</p></div></body></html>", baseURL: nil)
               }
 
-              class Coordinator: NSObject {
-                  var server: LocalHTTPServer?
-                  var nav: NavDebug?
-              }
+              return wv
+            }
+
+            func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+            func makeCoordinator() -> Coordinator {
+              Coordinator()
+            }
+
+            class Coordinator: NSObject {
+              var server: LocalHTTPServer?
+              var nav: NavDebug?
+            }
           }
           SWIFTEOF
 
@@ -444,33 +467,33 @@ jobs:
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-              <key>CFBundleDevelopmentRegion</key><string>en</string>
-              <key>CFBundleDisplayName</key><string>Godot Editor</string>
-              <key>CFBundleExecutable</key><string>GodotWebEditor</string>
-              <key>CFBundleIdentifier</key><string>com.godot.webeditor.local</string>
-              <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-              <key>CFBundleName</key><string>GodotWebEditor</string>
-              <key>CFBundlePackageType</key><string>APPL</string>
-              <key>CFBundleShortVersionString</key><string>1.0.0</string>
-              <key>CFBundleVersion</key><string>1</string>
-              <key>LSRequiresIPhoneOS</key><true/>
-              <key>UILaunchStoryboardName</key><string>LaunchScreen</string>
-              <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
-              <key>UISupportedInterfaceOrientations</key>
-              <array>
-                  <string>UIInterfaceOrientationPortrait</string>
-                  <string>UIInterfaceOrientationLandscapeLeft</string>
-                  <string>UIInterfaceOrientationLandscapeRight</string>
-              </array>
-              <key>UISupportedInterfaceOrientations~ipad</key>
-              <array>
-                  <string>UIInterfaceOrientationPortrait</string>
-                  <string>UIInterfaceOrientationPortraitUpsideDown</string>
-                  <string>UIInterfaceOrientationLandscapeLeft</string>
-                  <string>UIInterfaceOrientationLandscapeRight</string>
-              </array>
-              <key>UIViewControllerBasedStatusBarAppearance</key><true/>
-              <key>UIStatusBarHidden</key><true/>
+            <key>CFBundleDevelopmentRegion</key><string>en</string>
+            <key>CFBundleDisplayName</key><string>Godot Editor</string>
+            <key>CFBundleExecutable</key><string>GodotWebEditor</string>
+            <key>CFBundleIdentifier</key><string>com.godot.webeditor.local</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleName</key><string>GodotWebEditor</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>1.0.0</string>
+            <key>CFBundleVersion</key><string>1</string>
+            <key>LSRequiresIPhoneOS</key><true/>
+            <key>UILaunchStoryboardName</key><string>LaunchScreen</string>
+            <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
+            <key>UISupportedInterfaceOrientations</key>
+            <array>
+              <string>UIInterfaceOrientationPortrait</string>
+              <string>UIInterfaceOrientationLandscapeLeft</string>
+              <string>UIInterfaceOrientationLandscapeRight</string>
+            </array>
+            <key>UISupportedInterfaceOrientations~ipad</key>
+            <array>
+              <string>UIInterfaceOrientationPortrait</string>
+              <string>UIInterfaceOrientationPortraitUpsideDown</string>
+              <string>UIInterfaceOrientationLandscapeLeft</string>
+              <string>UIInterfaceOrientationLandscapeRight</string>
+            </array>
+            <key>UIViewControllerBasedStatusBarAppearance</key><true/>
+            <key>UIStatusBarHidden</key><true/>
           </dict>
           </plist>
           PLISTEOF
@@ -478,46 +501,46 @@ jobs:
           cat > GodotWebEditor/Resources/Base.lproj/LaunchScreen.storyboard << 'LAUNCHEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="21701" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="01J-lp-oVM">
-          <device id="retina6_12" orientation="portrait" appearance="dark"/>
-          <dependencies>
-          <deployment identifier="iOS"/>
-          <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="21679"/>
-          </dependencies>
-          <scenes>
-          <scene sceneID="EHf-IW-A2E">
-          <objects>
-          <viewController id="01J-lp-oVM" sceneMemberID="viewController">
-          <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">
-          <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
-          <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
-          <subviews>
-          <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Godot Web Editor" textAlignment="center" lineBreakMode="middleTruncation" baselineAdjustment="alignBaselines" minimumFontSize="18" translatesAutoresizingMaskIntoConstraints="NO" id="GJd-Yh-RWb">
-          <rect key="frame" x="0.0" y="263.66666666666669" width="393" height="43"/>
-          <fontDescription key="fontDescription" type="boldSystem" pointSize="36"/>
-          <color key="textColor" red="0.93725490570000003" green="0.93725490570000003" blue="0.95686274770000002" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
-          <nil key="highlightedColor"/>
-          </label>
-          <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • Native Touch • WebGL • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
-          <rect key="frame" x="0.0" y="314.66666666666669" width="393" height="21"/>
-          <fontDescription key="fontDescription" type="system" pointSize="15"/>
-          <color key="textColor" red="0.5803921569" green="0.5960784314" blue="0.6392156863" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
-          <nil key="highlightedColor"/>
-          </label>
-          </subviews>
-          <color key="backgroundColor" red="0.05098039216" green="0.06666666667" blue="0.09019607843" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
-          <constraints>
-          <constraint firstItem="GJd-Yh-RWb" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="e1q-4Y-1Sd"/>
-          <constraint firstItem="GJd-Yh-RWb" firstAttribute="centerY" secondItem="Ze5-6b-2t3" secondAttribute="centerY" constant="-20" id="Rmq-lb-GrQ"/>
-          <constraint firstItem="MN2-Qa-3nb" firstAttribute="top" secondItem="GJd-Yh-RWb" secondAttribute="bottom" constant="8" id="abc-12-xyz"/>
-          <constraint firstItem="MN2-Qa-3nb" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="def-34-uvw"/>
-          </constraints>
-          </view>
-          </viewController>
-          <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" userLabel="First Responder" sceneMemberID="firstResponder"/>
-          </objects>
-          <point key="canvasLocation" x="53" y="375"/>
-          </scene>
-          </scenes>
+            <device id="retina6_12" orientation="portrait" appearance="dark"/>
+            <dependencies>
+              <deployment identifier="iOS"/>
+              <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="21679"/>
+            </dependencies>
+            <scenes>
+              <scene sceneID="EHf-IW-A2E">
+                <objects>
+                  <viewController id="01J-lp-oVM" sceneMemberID="viewController">
+                    <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">
+                      <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
+                      <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                      <subviews>
+                        <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Godot Web Editor" textAlignment="center" lineBreakMode="middleTruncation" baselineAdjustment="alignBaselines" minimumFontSize="18" translatesAutoresizingMaskIntoConstraints="NO" id="GJd-Yh-RWb">
+                          <rect key="frame" x="0.0" y="263.66666666666669" width="393" height="43"/>
+                          <fontDescription key="fontDescription" type="boldSystem" pointSize="36"/>
+                          <color key="textColor" red="0.93725490570000003" green="0.93725490570000003" blue="0.95686274770000002" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                          <nil key="highlightedColor"/>
+                        </label>
+                        <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • Native Touch • WebGL • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
+                          <rect key="frame" x="0.0" y="314.66666666666669" width="393" height="21"/>
+                          <fontDescription key="fontDescription" type="system" pointSize="15"/>
+                          <color key="textColor" red="0.5803921569" green="0.5960784314" blue="0.6392156863" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                          <nil key="highlightedColor"/>
+                        </label>
+                      </subviews>
+                      <color key="backgroundColor" red="0.05098039216" green="0.06666666667" blue="0.09019607843" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                      <constraints>
+                        <constraint firstItem="GJd-Yh-RWb" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="e1q-4Y-1Sd"/>
+                        <constraint firstItem="GJd-Yh-RWb" firstAttribute="centerY" secondItem="Ze5-6b-2t3" secondAttribute="centerY" constant="-20" id="Rmq-lb-GrQ"/>
+                        <constraint firstItem="MN2-Qa-3nb" firstAttribute="top" secondItem="GJd-Yh-RWb" secondAttribute="bottom" constant="8" id="abc-12-xyz"/>
+                        <constraint firstItem="MN2-Qa-3nb" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="def-34-uvw"/>
+                      </constraints>
+                    </view>
+                  </viewController>
+                  <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" userLabel="First Responder" sceneMemberID="firstResponder"/>
+                </objects>
+                <point key="canvasLocation" x="53" y="375"/>
+              </scene>
+            </scenes>
           </document>
           LAUNCHEOF
 
@@ -575,22 +598,8 @@ jobs:
           set -ex
           cd GodotWebEditor
 
-          xcodebuild \
-            -project GodotWebEditor.xcodeproj \
-            -scheme GodotWebEditor \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath ../DerivedData \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            ONLY_ACTIVE_ARCH=NO \
-            ARCHS="arm64" \
-            VALID_ARCHS="arm64" \
-            ENABLE_BITCODE=NO \
-            clean build
+          xcodebuild             -project GodotWebEditor.xcodeproj             -scheme GodotWebEditor             -configuration Release             -destination 'generic/platform=iOS'             -derivedDataPath ../DerivedData             CODE_SIGN_IDENTITY=""             CODE_SIGNING_REQUIRED=NO             CODE_SIGNING_ALLOWED=NO             DEVELOPMENT_TEAM=""             PROVISIONING_PROFILE_SPECIFIER=""             ONLY_ACTIVE_ARCH=NO             ARCHS="arm64"             VALID_ARCHS="arm64"             ENABLE_BITCODE=NO             clean build
+
           cd ..
 
       - name: 7Verify .app Bundle
@@ -657,7 +666,7 @@ jobs:
           echo "╠══════════════════════════════════════════════════════╣"
           echo "║  📁 File: $IPA_NAME                                  ║"
           echo "║  📱 Install: AltStore / Sideloadly / Scarlet         ║"
-          echo "║  🔧 Auto‑renamed wasm if needed (4.4+ compatibility) ║"
+          echo "║  🔧 Fix: Removed broken CSS, let Godot handle touch  ║"
           echo "╚══════════════════════════════════════════════════════╝"
         env:
           IPA_NAME: ${{ env.IPA_NAME }}
