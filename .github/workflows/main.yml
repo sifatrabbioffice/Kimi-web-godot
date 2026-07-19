@@ -10,7 +10,7 @@ on:
       base_url:
         description: 'Godot Editor Base URL'
         required: true
-        default: 'https://editor.godotengine.org/'
+        default: 'https://editor.godotengine.org/releases/4.3/'   # <-- ঠিক করা ডিফল্ট
 
 jobs:
   build-ipa:
@@ -27,14 +27,12 @@ jobs:
       - name: 📦 Install xcodegen
         run: brew install xcodegen
 
-      # ---- ডিরেক্টরি তৈরি ----
       - name: 📁 Create Directories
         run: |
           mkdir -p GodotWebEditor/Sources
           mkdir -p GodotWebEditor/Resources/Base.lproj
           mkdir -p GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset
 
-      # ---- App.swift (Part 1) ----
       - name: 📝 Write App.swift (Part 1)
         run: |
           cat > GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
@@ -44,7 +42,7 @@ jobs:
           import Foundation
 
           // CONFIG
-          let BASE_URL = "${{ github.event.inputs.base_url || 'https://editor.godotengine.org/' }}"
+          let BASE_URL = "${{ github.event.inputs.base_url || 'https://editor.godotengine.org/releases/4.3/' }}"
           let SERVER_PORT: UInt16 = 8765
 
           // APP ENTRY
@@ -153,7 +151,6 @@ jobs:
           }
           SWIFTEOF
 
-      # ---- App.swift (Part 2) ----
       - name: 📝 Write App.swift (Part 2)
         run: |
           cat >> GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
@@ -608,7 +605,6 @@ jobs:
           }
           SWIFTEOF
 
-      # ---- Info.plist ----
       - name: 📝 Create Info.plist
         run: |
           cat > GodotWebEditor/Info.plist << 'PLISTEOF'
@@ -647,7 +643,6 @@ jobs:
           </plist>
           PLISTEOF
 
-      # ---- LaunchScreen.storyboard ----
       - name: 🎨 Create Launch Screen
         run: |
           cat > GodotWebEditor/Resources/Base.lproj/LaunchScreen.storyboard << 'LAUNCHEOF'
@@ -696,7 +691,6 @@ jobs:
           </document>
           LAUNCHEOF
 
-      # ---- Assets catalog ----
       - name: 🖼️ Setup App Icon Assets
         run: |
           echo '{"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/Contents.json
@@ -719,7 +713,6 @@ jobs:
           print("✅ Icon created")
           PYEOF
 
-      # ---- project.yml ----
       - name: 📄 Create project.yml
         run: |
           cat > GodotWebEditor/project.yml << 'YAMLEOF'
@@ -749,7 +742,6 @@ jobs:
                 path: Info.plist
           YAMLEOF
 
-      # ---- XcodeGen ----
       - name: 🧬 Generate Xcode Project
         run: |
           cd GodotWebEditor
@@ -819,7 +811,7 @@ jobs:
           echo "╠══════════════════════════════════════════════════════╣"
           echo "║  📁 File: ${{ env.IPA_NAME }}                          ║"
           echo "║  📱 Size: ~2-3 MB (files download on-demand)         ║"
-          echo "║  🌐 Source: ${{ github.event.inputs.base_url || 'https://editor.godotengine.org/' }}"
+          echo "║  🌐 Source: ${{ github.event.inputs.base_url || 'https://editor.godotengine.org/releases/4.3/' }}"
           echo "║  💾 Original filenames preserved in cache            ║"
           echo "║  📱 Install: AltStore / Sideloadly / Scarlet         ║"
           echo "╚══════════════════════════════════════════════════════╝"
