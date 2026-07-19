@@ -1,4 +1,4 @@
-name: 🎮 Godot Web Editor → Unsigned IPA (no .data)
+name: 🎮 Godot Web Editor → Unsigned IPA (Fully Offline)
 
 on:
   push:
@@ -8,13 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       godot_version:
-        description: 'Godot Version'
+        description: 'Godot Version (for naming only)'
         required: true
         default: '4.7.1'
-      godot_status:
-        description: 'Release Status'
-        required: true
-        default: 'stable'
 
 jobs:
   build-ipa:
@@ -32,71 +28,26 @@ jobs:
         run: brew install xcodegen
 
       # ═══════════════════════════════════════════════════════
-      # STEP 4: Download Godot Web Editor (skip .data check)
+      # STEP: Verify Offline Assets
       # ═══════════════════════════════════════════════════════
-      - name: ⬇️ Download Godot Web Editor
+      - name: 🔍 Verify Local godot_editor/
         run: |
           set -ex
-          VERSION="${{ github.event.inputs.godot_version || '4.7.1' }}"
-          STATUS="${{ github.event.inputs.godot_status || 'stable' }}"
 
-          echo "=========================================="
-          echo "📥 Downloading Godot ${VERSION}-${STATUS}"
-          echo "=========================================="
-
-          mkdir -p godot_editor
-          cd godot_editor
-
-          # Try multiple sources for the web editor zip
-          SOURCES=(
-            "https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
-            "https://downloads.tuxfamily.org/godotengine/${VERSION}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
-            "https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/web_editor.zip"
-          )
-
-          for URL in "${SOURCES[@]}"; do
-            echo "Trying: $URL"
-            if curl -fsL --max-time 180 -o web_editor.zip "$URL"; then
-              echo "✅ Downloaded from: $URL"
-              break
-            fi
-            echo "❌ Failed: $URL"
-          done
-
-          if [ ! -f web_editor.zip ] || [ ! -s web_editor.zip ]; then
-            echo "❌ All download sources failed!"
+          if [ ! -d "godot_editor" ]; then
+            echo "❌ godot_editor/ directory not found!"
+            echo "   Commit the Godot Web Editor files to the repo first."
             exit 1
           fi
 
-          echo "📦 ZIP size: $(ls -lh web_editor.zip | awk '{print $5}')"
-
-          # Extract the zip
-          unzip -q web_editor.zip || { echo "❌ Failed to extract ZIP"; exit 1; }
-          rm -f web_editor.zip
-
-          # Flatten subdirectory if present
-          SUBDIR=$(find . -maxdepth 1 -type d | grep -v '^\.$' | head -n 1)
-          if [ -n "$SUBDIR" ] && [ -d "$SUBDIR" ]; then
-            echo "📁 Flattening subdirectory: $SUBDIR"
-            mv "$SUBDIR"/* . 2>/dev/null || true
-            rmdir "$SUBDIR" 2>/dev/null || true
-          fi
-
-          # ═══════════════════════════════════════════════════════
-          # CRITICAL: Check only wasm + js (skip .data)
-          # ═══════════════════════════════════════════════════════
-          echo ""
-          echo "🔍 Checking for critical files (excluding .data)..."
-
-          # List all files first
-          echo "📂 All files in directory:"
-          ls -lah
+          echo "📂 Files in godot_editor/:"
+          ls -lah godot_editor/
           echo ""
 
           # Check for HTML entry point
           HTML_FILE=""
           for f in godot.editor.html godot.web.editor.html godot.html index.html; do
-            if [ -f "$f" ]; then
+            if [ -f "godot_editor/$f" ]; then
               HTML_FILE="$f"
               echo "✅ HTML entry point: $f"
               break
@@ -104,11 +55,11 @@ jobs:
           done
 
           if [ -z "$HTML_FILE" ]; then
-            echo "❌ No HTML entry point found!"
+            echo "❌ No HTML entry point found in godot_editor/!"
             exit 1
           fi
 
-          # Only .wasm and .js are required now
+          # Only .wasm and .js are required
           REQUIRED_FILES=(
             "godot.editor.wasm"
             "godot.editor.js"
@@ -116,8 +67,8 @@ jobs:
 
           MISSING=0
           for f in "${REQUIRED_FILES[@]}"; do
-            if [ -f "$f" ]; then
-              size=$(ls -lh "$f" | awk '{print $5}')
+            if [ -f "godot_editor/$f" ]; then
+              size=$(ls -lh "godot_editor/$f" | awk '{print $5}')
               echo "  ✅ $f ($size)"
             else
               echo "  ❌ MISSING: $f"
@@ -125,36 +76,19 @@ jobs:
             fi
           done
 
-          # Optional files (just info)
-          OPTIONAL_FILES=(
-            "godot.editor.worker.js"
-            "godot.editor.audio.worklet.js"
-          )
-
-          for f in "${OPTIONAL_FILES[@]}"; do
-            if [ -f "$f" ]; then
-              size=$(ls -lh "$f" | awk '{print $5}')
-              echo "  ✅ $f ($size)"
-            else
-              echo "  ⚠️  Optional missing: $f"
-            fi
-          done
-
           if [ $MISSING -gt 0 ]; then
             echo ""
             echo "❌ CRITICAL: $MISSING essential file(s) missing!"
-            echo "   Without .wasm and .js the editor will not work."
             exit 1
           fi
 
           echo ""
-          echo "✅ All critical files present (data file skipped)."
-          echo "📊 Total size: $(du -sh . | cut -f1)"
-          echo "📊 File count: $(find . -type f | wc -l)"
-          cd ..
+          echo "✅ All offline assets verified."
+          echo "📊 Total size: $(du -sh godot_editor | cut -f1)"
+          echo "📊 File count: $(find godot_editor -type f | wc -l)"
 
       # ═══════════════════════════════════════════════════════
-      # STEP 5: Create iOS App (exclude .data when copying)
+      # STEP: Create iOS App (exclude .data when copying)
       # ═══════════════════════════════════════════════════════
       - name: 📱 Create iOS App
         run: |
@@ -169,14 +103,14 @@ jobs:
           rsync -av --exclude='godot.editor.data' godot_editor/ GodotWebEditor/Resources/godot_editor/
           echo "✅ Copied $(find GodotWebEditor/Resources/godot_editor -type f | wc -l) files (excluding .data)"
 
-          # Verify .data is NOT present (optional check)
+          # Verify .data is NOT present
           if [ -f "GodotWebEditor/Resources/godot_editor/godot.editor.data" ]; then
             echo "⚠️ WARNING: godot.editor.data was copied (should not happen)."
           else
             echo "✅ godot.editor.data successfully excluded."
           fi
 
-          # Swift source (unchanged)
+          # Swift source
           cat > GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
           import SwiftUI
           import WebKit
@@ -357,7 +291,6 @@ jobs:
                   }
               }
 
-              // Auto-detect the HTML entry point
               private var entryHTML: String {
                   let candidates = ["godot.editor.html", "godot.web.editor.html", "godot.html", "index.html"]
                   for candidate in candidates {
@@ -516,7 +449,7 @@ jobs:
           }
           SWIFTEOF
 
-          # Info.plist (unchanged)
+          # Info.plist
           cat > GodotWebEditor/Info.plist << 'PLISTEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -553,7 +486,7 @@ jobs:
           </plist>
           PLISTEOF
 
-          # LaunchScreen (unchanged)
+          # LaunchScreen.storyboard
           cat > GodotWebEditor/Resources/Base.lproj/LaunchScreen.storyboard << 'LAUNCHEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="21701" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="01J-lp-oVM">
@@ -600,7 +533,7 @@ jobs:
           </document>
           LAUNCHEOF
 
-          # App Icon (placeholder, unchanged)
+          # App Icon
           echo '{"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/Contents.json
           echo '{"images":[{"filename":"appicon.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json
 
@@ -619,7 +552,7 @@ jobs:
           print("✅ Icon created")
           PYEOF
 
-          # project.yml (unchanged)
+          # project.yml
           cat > GodotWebEditor/project.yml << 'YAMLEOF'
           name: GodotWebEditor
           settings:
@@ -675,7 +608,7 @@ jobs:
 
           cd ..
 
-      - name: 🔍 Verify .app Bundle (skip .data check)
+      - name: 🔍 Verify .app Bundle
         run: |
           set -ex
 
@@ -692,7 +625,6 @@ jobs:
           echo "📂 .app contents:"
           ls -la "$APP_PATH/"
 
-          # Ensure godot_editor exists
           if [ ! -d "$APP_PATH/godot_editor" ]; then
             echo "⚠️ godot_editor missing! Copying manually..."
             mkdir -p "$APP_PATH/godot_editor"
@@ -706,8 +638,7 @@ jobs:
           echo "📊 godot_editor size: $(du -sh "$APP_PATH/godot_editor" | cut -f1)"
           echo "📊 Total .app size: $(du -sh "$APP_PATH" | cut -f1)"
 
-          # We intentionally do NOT check for godot.editor.data
-          echo "✅ Verification complete (godot.editor.data not required)."
+          echo "✅ Verification complete."
 
       - name: 📦 Package IPA
         run: |
@@ -720,7 +651,7 @@ jobs:
           rm -rf Payload/GodotWebEditor.app/_CodeSignature 2>/dev/null || true
 
           VERSION="${{ github.event.inputs.godot_version || '4.3' }}"
-          IPA_NAME="GodotWebEditor_v${VERSION}_no_data.ipa"
+          IPA_NAME="GodotWebEditor_v${VERSION}_offline.ipa"
 
           zip -qr "$IPA_NAME" Payload
           rm -rf Payload
@@ -731,18 +662,17 @@ jobs:
       - name: ⬆️ Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: godot-web-editor-ipa-no-data
-          path: GodotWebEditor_v*_no_data.ipa
+          name: godot-web-editor-ipa-offline
+          path: GodotWebEditor_v*_offline.ipa
           retention-days: 30
 
       - name: ✅ Done
         run: |
           echo ""
           echo "╔══════════════════════════════════════════════════════╗"
-          echo "║  🎉 IPA BUILD COMPLETE (without .data file)        ║"
+          echo "║  🎉 OFFLINE IPA BUILD COMPLETE                     ║"
           echo "╠══════════════════════════════════════════════════════╣"
           echo "║  📁 File: ${{ env.IPA_NAME }}                      ║"
-          echo "║  ⚠️  Note: godot.editor.data is EXCLUDED.          ║"
-          echo "║  📱 Editor will likely show a black screen.        ║"
-          echo "║  🔧 Use only if you have a custom .data loader.    ║"
+          echo "║  📦 Source: Committed godot_editor/ folder         ║"
+          echo "║  🌐 No network download required                   ║"
           echo "╚══════════════════════════════════════════════════════╝"
