@@ -10,7 +10,7 @@ on:
       base_url:
         description: 'Godot Editor Base URL'
         required: true
-        default: 'https://editor.godotengine.org/releases/4.3/'   # <-- ঠিক করা ডিফল্ট
+        default: 'https://editor.godotengine.org/releases/latest/'   # <-- ঠিক করা ডিফল্ট
 
 jobs:
   build-ipa:
