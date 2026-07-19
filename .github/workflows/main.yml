@@ -1,4 +1,4 @@
-name: 🎮 Godot Web Editor → Unsigned IPA (Download & Build)
+name: 🎮 Godot Web Editor → Unsigned IPA
 
 on:
   push:
@@ -20,171 +20,151 @@ jobs:
   build-ipa:
     runs-on: macos-latest
     steps:
-      - name: 📥 Checkout Repo
+      - name: 1 Checkout Repo
         uses: actions/checkout@v4
 
-      - name: 🛠️ Setup Xcode
+      - name: 2 Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
 
-      - name: 📦 Install xcodegen
+      - name: 3 Install xcodegen
         run: brew install xcodegen
 
-      # ═══════════════════════════════════════════════════════
-      # STEP: Download Godot Web Editor
-      # ═══════════════════════════════════════════════════════
-      - name: ⬇️ Download Godot Web Editor
+      # ============================================================
+      # 📥 Download & Extract
+      # ============================================================
+      - name: 4 Download Godot Web Editor
         run: |
           set -ex
           VERSION="${{ github.event.inputs.godot_version || '4.7.1' }}"
           STATUS="${{ github.event.inputs.godot_status || 'stable' }}"
-
           echo "=========================================="
           echo "📥 Downloading Godot ${VERSION}-${STATUS}"
           echo "=========================================="
-
           mkdir -p godot_editor
           cd godot_editor
-
-          # Primary: user-provided URL pattern
-          URL="https://github.com/godotengine/godot/releases/download/${VERSION}-${STATUS}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
-          
-          echo "Trying: $URL"
-          if ! curl -fsL --max-time 300 -o web_editor.zip "$URL"; then
-            echo "❌ Primary download failed, trying fallback..."
-            SOURCES=(
-              "https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
-              "https://downloads.tuxfamily.org/godotengine/${VERSION}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
-            )
-            for FB in "${SOURCES[@]}"; do
-              echo "Trying fallback: $FB"
-              if curl -fsL --max-time 300 -o web_editor.zip "$FB"; then
-                echo "✅ Downloaded from fallback: $FB"
-                break
-              fi
-              echo "❌ Fallback failed: $FB"
-            done
-          else
-            echo "✅ Downloaded from primary: $URL"
-          fi
-
+          SOURCES=(
+            "https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
+            "https://downloads.tuxfamily.org/godotengine/${VERSION}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
+            "https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/web_editor.zip"
+          )
+          for URL in "${SOURCES[@]}"; do
+            echo "Trying: $URL"
+            if curl -fsL --max-time 60 -o web_editor.zip "$URL"; then
+              echo "✅ Downloaded"
+              break
+            fi
+            echo "❌ Failed"
+          done
           if [ ! -f web_editor.zip ] || [ ! -s web_editor.zip ]; then
-            echo "❌ All download sources failed!"
+            echo "❌ All sources failed"
             exit 1
           fi
-
-          echo "📦 ZIP size: $(ls -lh web_editor.zip | awk '{print $5}')"
-
-          # Extract
-          unzip -q web_editor.zip || { echo "❌ Failed to extract ZIP"; exit 1; }
+          echo "📦 ZIP: $(ls -lh web_editor.zip | awk '{print $5}')"
+          unzip -q web_editor.zip || { echo "❌ Bad ZIP"; exit 1; }
           rm -f web_editor.zip
 
           # Flatten subdirectory if present
           SUBDIR=$(find . -maxdepth 1 -type d | grep -v '^\.$' | head -n 1)
           if [ -n "$SUBDIR" ] && [ -d "$SUBDIR" ]; then
-            echo "📁 Flattening subdirectory: $SUBDIR"
             mv "$SUBDIR"/* . 2>/dev/null || true
             rmdir "$SUBDIR" 2>/dev/null || true
           fi
 
-          echo ""
-          echo "📂 Files after extract:"
-          ls -lah
-          echo ""
-
-          # ═══════════════════════════════════════════════════════
-          # RENAME: godot.web.editor.wasm → godot.web.editor.wasm32.wasm
-          # ═══════════════════════════════════════════════════════
-          if [ -f "godot.web.editor.wasm" ]; then
-            echo "🔄 Renaming godot.web.editor.wasm → godot.web.editor.wasm32.wasm"
-            mv godot.web.editor.wasm godot.web.editor.wasm32.wasm
-            echo "✅ Renamed successfully"
-          else
-            echo "⚠️ godot.web.editor.wasm not found, skipping rename"
+          # ──────────────────────────────────────────────────────────
+          # 🔍 Check all required files
+          # ──────────────────────────────────────────────────────────
+          REQUIRED_FILES=(
+            "godot.editor.js"
+            "godot.editor.wasm"
+            "service.worker.js"
+            "godot.editor.html"
+            "favicon.png"
+            "godot.editor.audio.position.worklet.js"
+            "godot.editor.audio.worklet.js"
+            "inter-bold.woff2"
+            "inter-regular.woff2"
+            "logo.svg"
+            "manifest.json"
+            "offline.html"
+          )
+          echo "──────────────────────────────────────────"
+          echo "🔍 Checking required files..."
+          MISSING=()
+          for f in "${REQUIRED_FILES[@]}"; do
+            if [ -f "$f" ]; then
+              echo "  ✅ $f"
+            else
+              echo "  ❌ $f"
+              MISSING+=("$f")
+            fi
+          done
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "⚠️ Missing files: ${MISSING[*]}"
+            echo "Continuing anyway, but some features may be broken."
           fi
+          echo "──────────────────────────────────────────"
 
-          # Also check for godot.editor.wasm variant
+          # ──────────────────────────────────────────────────────────
+          # 🔄 Rename godot.editor.wasm → godot.editor.wasm32.wasm
+          #    and update references in the .js file
+          # ──────────────────────────────────────────────────────────
           if [ -f "godot.editor.wasm" ]; then
             echo "🔄 Renaming godot.editor.wasm → godot.editor.wasm32.wasm"
             mv godot.editor.wasm godot.editor.wasm32.wasm
             echo "✅ Renamed successfully"
+            # Update .js file to reference the new .wasm name
+            if [ -f "godot.editor.js" ]; then
+              echo "🔄 Updating godot.editor.js to use new .wasm filename"
+              sed -i '' 's/godot\.editor\.wasm/godot.editor.wasm32.wasm/g' godot.editor.js
+              echo "✅ .js updated"
+            fi
+          else
+            echo "⚠️ godot.editor.wasm not found, skipping rename"
           fi
 
-          echo ""
-          echo "📂 Final files after rename:"
-          ls -lah *.wasm 2>/dev/null || echo "  (no .wasm files)"
-          echo ""
-
-          # Check HTML entry point
-          HTML_FILE=""
-          for f in godot.editor.html godot.web.editor.html godot.html index.html; do
+          # ──────────────────────────────────────────────────────────
+          # 📄 Detect main HTML file (for the embedded server)
+          # ──────────────────────────────────────────────────────────
+          DEFAULT_HTML=""
+          for f in godot.editor.html godot.web.editor.html godot.html; do
             if [ -f "$f" ]; then
-              HTML_FILE="$f"
-              echo "✅ HTML entry point: $f"
+              DEFAULT_HTML="$f"
+              echo "🔍 Found main HTML: $f"
               break
             fi
           done
-
-          if [ -z "$HTML_FILE" ]; then
-            echo "❌ No HTML entry point found!"
+          if [ -z "$DEFAULT_HTML" ]; then
+            echo "❌ No known main HTML file found! Contents:"
+            ls -la
             exit 1
           fi
 
-          # Required files
-          REQUIRED_FILES=(
-            "godot.editor.js"
-          )
-
-          MISSING=0
-          for f in "${REQUIRED_FILES[@]}"; do
-            if [ -f "$f" ]; then
-              size=$(ls -lh "$f" | awk '{print $5}')
-              echo "  ✅ $f ($size)"
-            else
-              echo "  ❌ MISSING: $f"
-              MISSING=$((MISSING + 1))
-            fi
-          done
-
-          # Check for any wasm file
-          if ls *.wasm 1>/dev/null 2>&1; then
-            echo "  ✅ WASM file(s) found:"
-            ls -lh *.wasm
-          else
-            echo "  ❌ MISSING: No .wasm file found!"
-            MISSING=$((MISSING + 1))
-          fi
-
-          if [ $MISSING -gt 0 ]; then
-            echo ""
-            echo "❌ CRITICAL: $MISSING essential file(s) missing!"
-            exit 1
-          fi
-
-          echo ""
-          echo "✅ All critical files present."
-          echo "📊 Total size: $(du -sh . | cut -f1)"
-          echo "📊 File count: $(find . -type f | wc -l)"
+          echo "DEFAULT_HTML_FILE=$DEFAULT_HTML" >> "$GITHUB_ENV"
+          echo "✅ Main HTML = $DEFAULT_HTML"
+          echo "📂 Ready: $(du -sh . | cut -f1), $(find . -type f | wc -l) files"
+          ls -la
           cd ..
 
-      # ═══════════════════════════════════════════════════════
-      # STEP: Create iOS App
-      # ═══════════════════════════════════════════════════════
-      - name: 📱 Create iOS App
+      # ============================================================
+      # 🔧 iOS App creation (uses DEFAULT_HTML_FILE from env)
+      # ============================================================
+      - name: 5 Create iOS App
         run: |
           set -ex
+          DEFAULT_HTML="${DEFAULT_HTML_FILE}"
+          echo "✅ Using default HTML: $DEFAULT_HTML"
 
           mkdir -p GodotWebEditor/Sources
           mkdir -p GodotWebEditor/Resources/godot_editor
           mkdir -p GodotWebEditor/Resources/Base.lproj
           mkdir -p GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset
 
-          # Copy all files EXCEPT godot.editor.data
-          rsync -av --exclude='godot.editor.data' godot_editor/ GodotWebEditor/Resources/godot_editor/
-          echo "✅ Copied $(find GodotWebEditor/Resources/godot_editor -type f | wc -l) files (excluding .data)"
+          cp -R godot_editor/* GodotWebEditor/Resources/godot_editor/
+          echo "✅ Copied $(find GodotWebEditor/Resources/godot_editor -type f | wc -l) files"
 
-          # Swift source
+          # Swift source with placeholder for default HTML
           cat > GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
           import SwiftUI
           import WebKit
@@ -194,17 +174,18 @@ jobs:
           final class LocalHTTPServer: NSObject {
               private var listener: NWListener?
               private let root: String
+              private let defaultHtml: String
               private var ready = false
 
-              init(rootPath: String) {
+              init(rootPath: String, defaultHtmlFile: String) {
                   self.root = rootPath
+                  self.defaultHtml = defaultHtmlFile
               }
 
               func start() -> Bool {
                   do {
                       let params = NWParameters.tcp
                       listener = try NWListener(using: params, on: NWEndpoint.Port(integerLiteral: 8765))
-
                       listener?.stateUpdateHandler = { [weak self] state in
                           switch state {
                           case .ready:
@@ -217,13 +198,10 @@ jobs:
                           default: break
                           }
                       }
-
                       listener?.newConnectionHandler = { [weak self] conn in
                           self?.handleConnection(conn)
                       }
-
                       listener?.start(queue: .global())
-
                       for _ in 0..<30 {
                           if ready { break }
                           usleep(100000)
@@ -243,27 +221,22 @@ jobs:
               private func readHTTP(connection: NWConnection, buffer: Data) {
                   connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, error in
                       guard let self = self else { connection.cancel(); return }
-
                       if let error = error {
                           print("[SERVER] Recv error: \(error)")
                           connection.cancel()
                           return
                       }
-
                       var buf = buffer
                       if let c = content { buf.append(c) }
-
                       let sep = Data("\r\n\r\n".utf8)
                       if let range = buf.range(of: sep) {
                           let headerBytes = buf.subdata(in: 0..<range.upperBound)
                           let bodyBytes = buf.subdata(in: range.upperBound..<buf.count)
-
                           if let requestText = String(data: headerBytes, encoding: .utf8) {
                               self.serve(connection: connection, request: requestText, bodyData: bodyBytes)
                               return
                           }
                       }
-
                       if isComplete {
                           connection.cancel()
                       } else {
@@ -278,37 +251,35 @@ jobs:
                       sendHTTP(connection: connection, status: 400, body: Data())
                       return
                   }
-
                   let parts = first.split(separator: " ")
                   guard parts.count >= 2 else {
                       sendHTTP(connection: connection, status: 400, body: Data())
                       return
                   }
-
                   let rawPath = String(parts[1])
-                  let path = rawPath == "/" ? "/" + self.entryHTML : rawPath
-
+                  let path: String
+                  if rawPath == "/" {
+                      path = "/" + self.defaultHtml
+                      print("[SERVER] Default file: \(path)")
+                  } else {
+                      path = rawPath
+                  }
                   let filePath = (root + path).replacingOccurrences(of: "..", with: "")
                   let stdPath = (filePath as NSString).standardizingPath
                   let stdRoot = (root as NSString).standardizingPath
-
                   guard stdPath.hasPrefix(stdRoot) else {
                       sendHTTP(connection: connection, status: 403, body: Data())
                       return
                   }
-
                   guard FileManager.default.fileExists(atPath: stdPath),
                         let data = FileManager.default.contents(atPath: stdPath) else {
                       print("[SERVER] 404: \(path)")
                       sendHTTP(connection: connection, status: 404, body: Data())
                       return
                   }
-
                   let ext = (stdPath as NSString).pathExtension.lowercased()
                   let mime = mimeFor(ext: ext)
-
-                  print("[SERVER] 200 \(path) (\(data.count) bytes, \(mime))")
-
+                  print("[SERVER] 200 \(path) (\(data.count) bytes)")
                   var header = "HTTP/1.1 200 OK\r\n"
                   header += "Content-Type: " + mime + "\r\n"
                   header += "Content-Length: " + String(data.count) + "\r\n"
@@ -317,12 +288,10 @@ jobs:
                   header += "Access-Control-Allow-Origin: *\r\n"
                   header += "Connection: close\r\n"
                   header += "\r\n"
-
                   guard let headerData = header.data(using: .utf8) else {
                       connection.cancel()
                       return
                   }
-
                   connection.send(content: headerData, completion: .contentProcessed { _ in
                       connection.send(content: data, completion: .contentProcessed { _ in
                           connection.cancel()
@@ -334,7 +303,6 @@ jobs:
                   var header = "HTTP/1.1 " + String(status) + " "
                   header += (status == 404 ? "Not Found" : (status == 403 ? "Forbidden" : "Error"))
                   header += "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-
                   if let data = header.data(using: .utf8) {
                       connection.send(content: data, completion: .contentProcessed { _ in
                           connection.cancel()
@@ -363,17 +331,6 @@ jobs:
                   case "txt": return "text/plain"
                   default: return "application/octet-stream"
                   }
-              }
-
-              private var entryHTML: String {
-                  let candidates = ["godot.editor.html", "godot.web.editor.html", "godot.html", "index.html"]
-                  for candidate in candidates {
-                      let path = (root + "/" + candidate)
-                      if FileManager.default.fileExists(atPath: path) {
-                          return candidate
-                      }
-                  }
-                  return "index.html"
               }
           }
 
@@ -410,19 +367,16 @@ jobs:
           struct EditorView: UIViewRepresentable {
               func makeUIView(context: Context) -> WKWebView {
                   let cfg = WKWebViewConfiguration()
-
                   cfg.preferences.javaScriptEnabled = true
                   cfg.preferences.javaScriptCanOpenWindowsAutomatically = true
                   cfg.allowsInlineMediaPlayback = true
                   cfg.mediaTypesRequiringUserActionForPlayback = []
                   cfg.processPool = WKProcessPool()
-
                   if #available(iOS 15.0, *) {
                       let p = WKWebpagePreferences()
                       p.allowsContentJavaScript = true
                       cfg.defaultWebpagePreferences = p
                   }
-
                   cfg.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
 
                   let bridge = JSBridge()
@@ -434,7 +388,6 @@ jobs:
                       meta.name = 'viewport';
                       meta.content = 'width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=3.0, user-scalable=yes';
                       document.head.appendChild(meta);
-
                       var ol=console.log, oe=console.error, ow=console.warn;
                       function send(l,a){
                           try{
@@ -446,7 +399,6 @@ jobs:
                       console.warn=function(){send('WRN',arguments);ow.apply(console,arguments);};
                       window.onerror=function(m,u,l,c,err){send('FATAL',[m,'at',u+':'+l+':'+c]);return false;};
                       window.onunhandledrejection=function(e){send('REJ',['Unhandled:',e.reason]);};
-
                       var origGetContext = HTMLCanvasElement.prototype.getContext;
                       HTMLCanvasElement.prototype.getContext = function(type, attrs) {
                           var ctx = origGetContext.call(this, type, attrs);
@@ -455,12 +407,13 @@ jobs:
                           }
                           return ctx;
                       };
-
                       var style = document.createElement('style');
-                      style.textContent = 'html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; } canvas { display: block; }';
+                      style.textContent = `
+                          html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+                          #canvas, canvas { display: block; }
+                      `;
                       document.head.appendChild(style);
-
-                      console.log('GODOT-iOS: Fix script loaded');
+                      console.log('GODOT-iOS: Minimal fix loaded. Godot handles touch natively.');
                       console.log('crossOriginIsolated:', window.crossOriginIsolated);
                   })();
                   """
@@ -469,7 +422,6 @@ jobs:
                   )
 
                   let wv = WKWebView(frame: .zero, configuration: cfg)
-
                   wv.scrollView.bounces = true
                   wv.scrollView.alwaysBounceVertical = false
                   wv.scrollView.alwaysBounceHorizontal = false
@@ -478,11 +430,9 @@ jobs:
                   wv.scrollView.maximumZoomScale = 3.0
                   wv.scrollView.isScrollEnabled = true
                   wv.scrollView.pinchGestureRecognizer?.isEnabled = true
-
                   wv.backgroundColor = .black
                   wv.isOpaque = true
                   wv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-
                   if #available(iOS 16.4, *) {
                       wv.isInspectable = true
                   }
@@ -492,13 +442,13 @@ jobs:
                   context.coordinator.nav = nav
 
                   let godotPath = Bundle.main.bundlePath + "/godot_editor"
-                  let server = LocalHTTPServer(rootPath: godotPath)
+                  let defaultHtmlFile = "%%DEFAULT_HTML_FILE%%"
+                  let server = LocalHTTPServer(rootPath: godotPath, defaultHtmlFile: defaultHtmlFile)
 
                   if server.start() {
                       context.coordinator.server = server
                       print("[APP] Server started, loading editor...")
                       usleep(300000)
-
                       if let url = URL(string: "http://127.0.0.1:8765/") {
                           wv.load(URLRequest(url: url))
                       }
@@ -506,7 +456,6 @@ jobs:
                       print("[APP] Server failed!")
                       wv.loadHTMLString("<html><body style=\"background:#000;color:#f00;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;\"><div style=\"text-align:center\"><h1>Server Error</h1><p>Could not start HTTP server</p></div></body></html>", baseURL: nil)
                   }
-
                   return wv
               }
 
@@ -523,7 +472,10 @@ jobs:
           }
           SWIFTEOF
 
-          # Info.plist
+          # Replace placeholder with actual default HTML filename
+          sed -i '' "s|%%DEFAULT_HTML_FILE%%|${DEFAULT_HTML}|g" GodotWebEditor/Sources/App.swift
+
+          # Info.plist, LaunchScreen, Assets etc.
           cat > GodotWebEditor/Info.plist << 'PLISTEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -560,7 +512,6 @@ jobs:
           </plist>
           PLISTEOF
 
-          # LaunchScreen.storyboard
           cat > GodotWebEditor/Resources/Base.lproj/LaunchScreen.storyboard << 'LAUNCHEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="21701" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="01J-lp-oVM">
@@ -607,7 +558,6 @@ jobs:
           </document>
           LAUNCHEOF
 
-          # App Icon
           echo '{"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/Contents.json
           echo '{"images":[{"filename":"appicon.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json
 
@@ -626,7 +576,6 @@ jobs:
           print("✅ Icon created")
           PYEOF
 
-          # project.yml
           cat > GodotWebEditor/project.yml << 'YAMLEOF'
           name: GodotWebEditor
           settings:
@@ -658,11 +607,10 @@ jobs:
           xcodegen generate
           cd ..
 
-      - name: 🔨 Build Unsigned .app
+      - name: 6 Build Unsigned .app
         run: |
           set -ex
           cd GodotWebEditor
-
           xcodebuild \
             -project GodotWebEditor.xcodeproj \
             -scheme GodotWebEditor \
@@ -679,32 +627,26 @@ jobs:
             VALID_ARCHS="arm64" \
             ENABLE_BITCODE=NO \
             clean build
-
           cd ..
 
-      - name: 🔍 Verify .app Bundle
+      - name: 7 Verify .app Bundle
         run: |
           set -ex
-
           APP_PATH=$(find DerivedData -name "GodotWebEditor.app" -type d | head -n 1)
-
           if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
             echo "❌ .app bundle not found!"
             find DerivedData -type d -name "*.app" 2>/dev/null || true
             exit 1
           fi
-
           echo "✅ Found app: $APP_PATH"
           echo ""
           echo "📂 .app contents:"
           ls -la "$APP_PATH/"
-
           if [ ! -d "$APP_PATH/godot_editor" ]; then
             echo "⚠️ godot_editor missing! Copying manually..."
             mkdir -p "$APP_PATH/godot_editor"
-            rsync -av --exclude='godot.editor.data' GodotWebEditor/Resources/godot_editor/ "$APP_PATH/godot_editor/"
+            cp -R GodotWebEditor/Resources/godot_editor/* "$APP_PATH/godot_editor/"
           fi
-
           echo ""
           echo "📂 godot_editor in .app:"
           ls -la "$APP_PATH/godot_editor/"
@@ -712,40 +654,36 @@ jobs:
           echo "📊 godot_editor size: $(du -sh "$APP_PATH/godot_editor" | cut -f1)"
           echo "📊 Total .app size: $(du -sh "$APP_PATH" | cut -f1)"
 
-          echo "✅ Verification complete."
-
-      - name: 📦 Package IPA
+      - name: 8 Package IPA
         run: |
           set -ex
-
           APP_PATH=$(find DerivedData -name "GodotWebEditor.app" -type d | head -n 1)
-
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
           rm -rf Payload/GodotWebEditor.app/_CodeSignature 2>/dev/null || true
-
-          VERSION="${{ github.event.inputs.godot_version || '4.3' }}"
-          IPA_NAME="GodotWebEditor_v${VERSION}.ipa"
-
+          VERSION="${{ github.event.inputs.godot_version || '4.7.1' }}"
+          IPA_NAME="GodotWebEditor_v${VERSION}_unsigned.ipa"
           zip -qr "$IPA_NAME" Payload
           rm -rf Payload
-
           echo "IPA_NAME=$IPA_NAME" >> "$GITHUB_ENV"
           echo "✅ Created: $IPA_NAME ($(du -sh "$IPA_NAME" | cut -f1))"
 
-      - name: ⬆️ Upload IPA
+      - name: 9 Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: godot-web-editor-ipa
-          path: GodotWebEditor_v*.ipa
+          path: GodotWebEditor_v*_unsigned.ipa
           retention-days: 30
 
       - name: ✅ Done
         run: |
           echo ""
           echo "╔══════════════════════════════════════════════════════╗"
-          echo "║  🎉 IPA BUILD COMPLETE                             ║"
+          echo "║  🎉 IPA BUILD COMPLETE                               ║"
           echo "╠══════════════════════════════════════════════════════╣"
-          echo "║  📁 File: ${{ env.IPA_NAME }}                      ║"
-          echo "║  📦 Downloaded from GitHub release                 ║"
+          echo "║  📁 File: $IPA_NAME                                  ║"
+          echo "║  📱 Install: AltStore / Sideloadly / Scarlet         ║"
+          echo "║  🔧 Fix: Renamed .wasm & updated .js references      ║"
           echo "╚══════════════════════════════════════════════════════╝"
+        env:
+          IPA_NAME: ${{ env.IPA_NAME }}
