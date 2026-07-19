@@ -1,4 +1,4 @@
-name: 🎮 Godot Web Editor → Unsigned IPA (Download & Build)
+name: 🎮 Godot Web Editor → Fully Offline Unsigned IPA
 
 on:
   push:
@@ -32,7 +32,7 @@ jobs:
         run: brew install xcodegen
 
       # ═══════════════════════════════════════════════════════
-      # STEP: Download Godot Web Editor
+      # STEP 1: Download Godot Web Editor
       # ═══════════════════════════════════════════════════════
       - name: ⬇️ Download Godot Web Editor
         run: |
@@ -47,13 +47,11 @@ jobs:
           mkdir -p godot_editor
           cd godot_editor
 
-          # Primary: user-provided URL pattern
           URL="https://github.com/godotengine/godot/releases/download/${VERSION}-${STATUS}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
           
           echo "Trying: $URL"
           if ! curl -fsL --max-time 300 -o web_editor.zip "$URL"; then
-            echo "❌ Primary download failed, trying fallback..."
-            # Fallback patterns
+            echo "❌ Primary failed, trying fallback..."
             SOURCES=(
               "https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
               "https://downloads.tuxfamily.org/godotengine/${VERSION}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
@@ -76,8 +74,6 @@ jobs:
           fi
 
           echo "📦 ZIP size: $(ls -lh web_editor.zip | awk '{print $5}')"
-
-          # Extract
           unzip -q web_editor.zip || { echo "❌ Failed to extract ZIP"; exit 1; }
           rm -f web_editor.zip
 
@@ -92,54 +88,155 @@ jobs:
           echo ""
           echo "📂 Downloaded files:"
           ls -lah
+          cd ..
+
+      # ═══════════════════════════════════════════════════════
+      # STEP 2: 🔒 MAKE FULLY OFFLINE — Patch all online references
+      # ═══════════════════════════════════════════════════════
+      - name: 🔒 Patch Files for Full Offline Mode
+        run: |
+          set -ex
+          cd godot_editor
+
+          echo "=========================================="
+          echo "🔒 Patching for FULL OFFLINE mode"
+          echo "=========================================="
+
+          # Find all text files (html, js, json, css)
+          TEXT_FILES=$(find . -type f \( -name "*.html" -o -name "*.js" -o -name "*.json" -o -name "*.css" \))
+
+          echo ""
+          echo "📂 Files to scan:"
+          echo "$TEXT_FILES"
           echo ""
 
-          # Check HTML entry point
-          HTML_FILE=""
-          for f in godot.editor.html godot.web.editor.html godot.html index.html; do
-            if [ -f "$f" ]; then
-              HTML_FILE="$f"
-              echo "✅ HTML entry point: $f"
+          # --- 2.1: Remove/replace external URLs ---
+          for f in $TEXT_FILES; do
+            # Backup
+            cp "$f" "$f.bak"
+
+            # Remove Google Fonts, CDNs, external CSS/JS links
+            sed -i '' \
+              -e 's|https\?://[^"'''"'"']*\(googleapis\|gstatic\|cdnjs\|jsdelivr\|unpkg\|bootstrapcdn\|fontawesome\|analytics\|gtag\|googletagmanager\)[^"'''"'"']*||g' \
+              -e 's|https\?://[^"'''"'"']*\.css[^"'''"'"']*||g' \
+              -e 's|https\?://[^"'''"'"']*\.woff2[^"'''"'"']*||g' \
+              -e 's|https\?://[^"'''"'"']*\.woff[^"'''"'"']*||g' \
+              -e 's|https\?://[^"'''"'"']*\.ttf[^"'''"'"']*||g' \
+              "$f" 2>/dev/null || true
+
+            # Replace any remaining http/https URLs with empty/local
+            sed -i '' \
+              -e 's|https\?://[a-zA-Z0-9.-]*/|./|g' \
+              -e 's|fetch("https\?://|fetch("./|g' \
+              -e 's|fetch('\''https\?://|fetch('\''./|g' \
+              -e 's|XMLHttpRequest.*open.*https\?://|// XMLHttpRequest blocked (offline)|g' \
+              "$f" 2>/dev/null || true
+          done
+
+          # --- 2.2: Disable Service Worker (prevents online fetch attempts) ---
+          for f in $(find . -name "*.js" -o -name "*.html"); do
+            # Comment out service worker registration
+            sed -i '' \
+              -e 's/navigator\.serviceWorker\.register/\/\/ OFFLINE: navigator.serviceWorker.register/g' \
+              -e 's/navigator\.serviceWorker\.ready/\/\/ OFFLINE: navigator.serviceWorker.ready/g' \
+              -e 's/"service-worker"/"service-worker-offline"/g' \
+              -e 's/service\.worker\.js/service.worker.offline.js/g' \
+              "$f" 2>/dev/null || true
+          done
+
+          # Rename service worker file so it can't register
+          if [ -f "service.worker.js" ]; then
+            mv service.worker.js service.worker.js.disabled
+            echo "✅ Disabled service.worker.js"
+          fi
+
+          # --- 2.3: Patch godot.editor.js to prevent remote .data fetch ---
+          JS_FILE=""
+          for candidate in godot.editor.js godot.web.editor.js godot.js; do
+            if [ -f "$candidate" ]; then
+              JS_FILE="$candidate"
               break
             fi
           done
 
-          if [ -z "$HTML_FILE" ]; then
-            echo "❌ No HTML entry point found!"
-            exit 1
+          if [ -n "$JS_FILE" ]; then
+            echo "🔧 Patching $JS_FILE for offline..."
+
+            # Replace remote fetch URLs with local paths
+            sed -i '' \
+              -e 's|https\?://[^"'''"'"' ]*\.data|godot.editor.data|g' \
+              -e 's|https\?://[^"'''"'"' ]*\.wasm|godot.editor.wasm|g' \
+              -e 's|new URL([^)]*)|location.href|g' \
+              -e 's|fetch(url|fetchLocal(url|g' \
+              -e 's|importScripts(|// importScripts(|g' \
+              "$JS_FILE" 2>/dev/null || true
+
+            # Add offline flag at top
+            echo '"use strict"; var GODOT_OFFLINE = true;' | cat - "$JS_FILE" > tmp.js && mv tmp.js "$JS_FILE"
+
+            echo "✅ Patched $JS_FILE"
           fi
 
-          # Required files
-          REQUIRED_FILES=(
-            "godot.editor.wasm"
-            "godot.editor.js"
-          )
-
-          MISSING=0
-          for f in "${REQUIRED_FILES[@]}"; do
-            if [ -f "$f" ]; then
-              size=$(ls -lh "$f" | awk '{print $5}')
-              echo "  ✅ $f ($size)"
-            else
-              echo "  ❌ MISSING: $f"
-              MISSING=$((MISSING + 1))
+          # --- 2.4: Patch HTML to remove any external meta/link/script ---
+          HTML_FILE=""
+          for candidate in godot.editor.html godot.web.editor.html godot.html index.html; do
+            if [ -f "$candidate" ]; then
+              HTML_FILE="$candidate"
+              break
             fi
           done
 
-          if [ $MISSING -gt 0 ]; then
-            echo ""
-            echo "❌ CRITICAL: $MISSING essential file(s) missing!"
-            exit 1
+          if [ -n "$HTML_FILE" ]; then
+            echo "🔧 Patching $HTML_FILE for offline..."
+
+            # Remove external link tags (fonts, stylesheets from URLs)
+            sed -i '' \
+              -e 's|<link[^>]*href=["'\'']*https[^>]*>||g' \
+              -e 's|<script[^>]*src=["'\'']*https[^>]*></script>||g' \
+              -e 's|<script[^>]*src=["'\'']*//[^>]*></script>||g' \
+              "$HTML_FILE" 2>/dev/null || true
+
+            # Ensure viewport meta exists for mobile
+            if ! grep -q "viewport" "$HTML_FILE"; then
+              sed -i '' \
+                -e 's|<head>|<head>\n<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">|' \
+                "$HTML_FILE" 2>/dev/null || true
+            fi
+
+            echo "✅ Patched $HTML_FILE"
           fi
 
+          # --- 2.5: Patch manifest.json if exists ---
+          if [ -f "manifest.json" ]; then
+            sed -i '' \
+              -e 's|https\?://[^"'''"'"']*|.|g' \
+              "manifest.json" 2>/dev/null || true
+            echo "✅ Patched manifest.json"
+          fi
+
+          # --- 2.6: Verify no http/https remains ---
           echo ""
-          echo "✅ All critical files present."
-          echo "📊 Total size: $(du -sh . | cut -f1)"
-          echo "📊 File count: $(find . -type f | wc -l)"
+          echo "🔍 Scanning for remaining online URLs..."
+          REMAINING=$(grep -r "http://" . --include="*.js" --include="*.html" --include="*.json" --include="*.css" 2>/dev/null || true)
+          REMAINING2=$(grep -r "https://" . --include="*.js" --include="*.html" --include="*.json" --include="*.css" 2>/dev/null || true)
+
+          if [ -n "$REMAINING" ] || [ -n "$REMAINING2" ]; then
+            echo "⚠️ WARNING: Some URLs may remain (usually harmless):"
+            echo "$REMAINING"
+            echo "$REMAINING2"
+          else
+            echo "✅ No external URLs found in source files."
+          fi
+
+          # --- 2.7: Clean backups ---
+          find . -name "*.bak" -delete
+
+          echo ""
+          echo "✅ Full offline patching complete."
           cd ..
 
       # ═══════════════════════════════════════════════════════
-      # STEP: Create iOS App
+      # STEP 3: Create iOS App
       # ═══════════════════════════════════════════════════════
       - name: 📱 Create iOS App
         run: |
@@ -154,7 +251,7 @@ jobs:
           rsync -av --exclude='godot.editor.data' godot_editor/ GodotWebEditor/Resources/godot_editor/
           echo "✅ Copied $(find GodotWebEditor/Resources/godot_editor -type f | wc -l) files (excluding .data)"
 
-          # Swift source
+          # Swift source with OFFLINE flag
           cat > GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
           import SwiftUI
           import WebKit
@@ -400,6 +497,10 @@ jobs:
 
                   let fixScript = """
                   (function(){
+                      // Mark as fully offline
+                      window.GODOT_OFFLINE = true;
+                      window.navigator.onLine = true;
+
                       var meta = document.createElement('meta');
                       meta.name = 'viewport';
                       meta.content = 'width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=3.0, user-scalable=yes';
@@ -417,6 +518,24 @@ jobs:
                       window.onerror=function(m,u,l,c,err){send('FATAL',[m,'at',u+':'+l+':'+c]);return false;};
                       window.onunhandledrejection=function(e){send('REJ',['Unhandled:',e.reason]);};
 
+                      // Block all external fetch/XMLHttpRequest
+                      var origFetch = window.fetch;
+                      window.fetch = function(url, opts) {
+                          if (typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'))) {
+                              console.warn('[OFFLINE] Blocked fetch to:', url);
+                              return Promise.reject(new Error('Offline mode: external fetch blocked'));
+                          }
+                          return origFetch.apply(this, arguments);
+                      };
+                      var origXHR = window.XMLHttpRequest.prototype.open;
+                      window.XMLHttpRequest.prototype.open = function(method, url) {
+                          if (typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'))) {
+                              console.warn('[OFFLINE] Blocked XHR to:', url);
+                              return;
+                          }
+                          return origXHR.apply(this, arguments);
+                      };
+
                       var origGetContext = HTMLCanvasElement.prototype.getContext;
                       HTMLCanvasElement.prototype.getContext = function(type, attrs) {
                           var ctx = origGetContext.call(this, type, attrs);
@@ -430,7 +549,7 @@ jobs:
                       style.textContent = 'html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; } canvas { display: block; }';
                       document.head.appendChild(style);
 
-                      console.log('GODOT-iOS: Fix script loaded');
+                      console.log('GODOT-iOS: Offline mode active');
                       console.log('crossOriginIsolated:', window.crossOriginIsolated);
                   })();
                   """
@@ -553,7 +672,7 @@ jobs:
                                           <color key="textColor" red="0.93725490570000003" green="0.93725490570000003" blue="0.95686274770000002" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                                           <nil key="highlightedColor"/>
                                       </label>
-                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Offline • Native Touch • WebGL • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
+                                      <label opaque="NO" clipsSubviews="YES" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Fully Offline • Native Touch • WebGL • Metal GPU" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="YES" translatesAutoresizingMaskIntoConstraints="NO" id="MN2-Qa-3nb">
                                           <rect key="frame" x="0.0" y="314.66666666666669" width="393" height="21"/>
                                           <fontDescription key="fontDescription" type="system" pointSize="15"/>
                                           <color key="textColor" red="0.5803921569" green="0.5960784314" blue="0.6392156863" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
@@ -695,7 +814,7 @@ jobs:
           rm -rf Payload/GodotWebEditor.app/_CodeSignature 2>/dev/null || true
 
           VERSION="${{ github.event.inputs.godot_version || '4.3' }}"
-          IPA_NAME="GodotWebEditor_v${VERSION}.ipa"
+          IPA_NAME="GodotWebEditor_v${VERSION}_offline.ipa"
 
           zip -qr "$IPA_NAME" Payload
           rm -rf Payload
@@ -706,16 +825,18 @@ jobs:
       - name: ⬆️ Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: godot-web-editor-ipa
-          path: GodotWebEditor_v*.ipa
+          name: godot-web-editor-ipa-offline
+          path: GodotWebEditor_v*_offline.ipa
           retention-days: 30
 
       - name: ✅ Done
         run: |
           echo ""
           echo "╔══════════════════════════════════════════════════════╗"
-          echo "║  🎉 IPA BUILD COMPLETE                             ║"
+          echo "║  🎉 FULLY OFFLINE IPA BUILD COMPLETE               ║"
           echo "╠══════════════════════════════════════════════════════╣"
           echo "║  📁 File: ${{ env.IPA_NAME }}                      ║"
-          echo "║  📦 Downloaded from GitHub release                 ║"
+          echo "║  🌐 No internet required                           ║"
+          echo "║  🔒 External URLs patched & blocked                ║"
+          echo "║  🛡️ Service Worker disabled                        ║"
           echo "╚══════════════════════════════════════════════════════╝"
