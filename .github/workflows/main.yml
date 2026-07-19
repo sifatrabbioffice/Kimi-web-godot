@@ -1,4 +1,4 @@
-name: 🎮 Godot Web Editor → Unsigned IPA (with On-Screen Console)
+name: 🎮 Godot Web Editor → Unsigned IPA (no .data)
 
 on:
   push:
@@ -31,10 +31,13 @@ jobs:
       - name: 📦 Install xcodegen
         run: brew install xcodegen
 
-      - name: ⬇️ Download Godot Web Editor (skip .data)
+      # ═══════════════════════════════════════════════════════
+      # STEP 4: Download Godot Web Editor (skip .data check)
+      # ═══════════════════════════════════════════════════════
+      - name: ⬇️ Download Godot Web Editor
         run: |
           set -ex
-          VERSION="${{ github.event.inputs.godot_version || '4.3' }}"
+          VERSION="${{ github.event.inputs.godot_version || '4.7' }}"
           STATUS="${{ github.event.inputs.godot_status || 'stable' }}"
 
           echo "=========================================="
@@ -44,6 +47,7 @@ jobs:
           mkdir -p godot_editor
           cd godot_editor
 
+          # Try multiple sources for the web editor zip
           SOURCES=(
             "https://github.com/godotengine/godot-builds/releases/download/${VERSION}-${STATUS}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
             "https://downloads.tuxfamily.org/godotengine/${VERSION}/Godot_v${VERSION}-${STATUS}_web_editor.zip"
@@ -64,9 +68,13 @@ jobs:
             exit 1
           fi
 
+          echo "📦 ZIP size: $(ls -lh web_editor.zip | awk '{print $5}')"
+
+          # Extract the zip
           unzip -q web_editor.zip || { echo "❌ Failed to extract ZIP"; exit 1; }
           rm -f web_editor.zip
 
+          # Flatten subdirectory if present
           SUBDIR=$(find . -maxdepth 1 -type d | grep -v '^\.$' | head -n 1)
           if [ -n "$SUBDIR" ] && [ -d "$SUBDIR" ]; then
             echo "📁 Flattening subdirectory: $SUBDIR"
@@ -74,9 +82,18 @@ jobs:
             rmdir "$SUBDIR" 2>/dev/null || true
           fi
 
+          # ═══════════════════════════════════════════════════════
+          # CRITICAL: Check only wasm + js (skip .data)
+          # ═══════════════════════════════════════════════════════
           echo ""
-          echo "🔍 Checking for core files (without .data)..."
+          echo "🔍 Checking for critical files (excluding .data)..."
 
+          # List all files first
+          echo "📂 All files in directory:"
+          ls -lah
+          echo ""
+
+          # Check for HTML entry point
           HTML_FILE=""
           for f in godot.editor.html godot.web.editor.html godot.html index.html; do
             if [ -f "$f" ]; then
@@ -91,6 +108,7 @@ jobs:
             exit 1
           fi
 
+          # Only .wasm and .js are required now
           REQUIRED_FILES=(
             "godot.editor.wasm"
             "godot.editor.js"
@@ -107,15 +125,38 @@ jobs:
             fi
           done
 
+          # Optional files (just info)
+          OPTIONAL_FILES=(
+            "godot.editor.worker.js"
+            "godot.editor.audio.worklet.js"
+          )
+
+          for f in "${OPTIONAL_FILES[@]}"; do
+            if [ -f "$f" ]; then
+              size=$(ls -lh "$f" | awk '{print $5}')
+              echo "  ✅ $f ($size)"
+            else
+              echo "  ⚠️  Optional missing: $f"
+            fi
+          done
+
           if [ $MISSING -gt 0 ]; then
-            echo "❌ $MISSING essential file(s) missing!"
+            echo ""
+            echo "❌ CRITICAL: $MISSING essential file(s) missing!"
+            echo "   Without .wasm and .js the editor will not work."
             exit 1
           fi
 
-          echo "✅ Core files present (excluding .data)."
+          echo ""
+          echo "✅ All critical files present (data file skipped)."
+          echo "📊 Total size: $(du -sh . | cut -f1)"
+          echo "📊 File count: $(find . -type f | wc -l)"
           cd ..
 
-      - name: 📱 Create iOS App (with on-screen console)
+      # ═══════════════════════════════════════════════════════
+      # STEP 5: Create iOS App (exclude .data when copying)
+      # ═══════════════════════════════════════════════════════
+      - name: 📱 Create iOS App
         run: |
           set -ex
 
@@ -124,58 +165,31 @@ jobs:
           mkdir -p GodotWebEditor/Resources/Base.lproj
           mkdir -p GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset
 
-          # Copy all except .data
+          # Copy all files EXCEPT godot.editor.data using rsync
           rsync -av --exclude='godot.editor.data' godot_editor/ GodotWebEditor/Resources/godot_editor/
-          echo "✅ Copied files (excluding .data)"
+          echo "✅ Copied $(find GodotWebEditor/Resources/godot_editor -type f | wc -l) files (excluding .data)"
 
-          # ═══════════════════════════════════════════════════════
-          # UPDATED App.swift with ON-SCREEN CONSOLE OVERLAY
-          # ═══════════════════════════════════════════════════════
+          # Verify .data is NOT present (optional check)
+          if [ -f "GodotWebEditor/Resources/godot_editor/godot.editor.data" ]; then
+            echo "⚠️ WARNING: godot.editor.data was copied (should not happen)."
+          else
+            echo "✅ godot.editor.data successfully excluded."
+          fi
+
+          # Swift source (unchanged)
           cat > GodotWebEditor/Sources/App.swift << 'SWIFTEOF'
           import SwiftUI
           import WebKit
           import Network
           import Foundation
 
-          // MARK: - Console Manager (Shared Logger)
-          class ConsoleManager: ObservableObject {
-              @Published var logs: [String] = []
-              @Published var isVisible: Bool = false
-
-              func log(_ msg: String) {
-                  DispatchQueue.main.async {
-                      let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-                      let entry = "[\(timestamp)] \(msg)"
-                      self.logs.append(entry)
-                      if self.logs.count > 500 {
-                          self.logs.removeFirst()
-                      }
-                  }
-              }
-
-              func clear() {
-                  DispatchQueue.main.async {
-                      self.logs.removeAll()
-                  }
-              }
-
-              func toggle() {
-                  DispatchQueue.main.async {
-                      self.isVisible.toggle()
-                  }
-              }
-          }
-
-          // MARK: - HTTP Server
           final class LocalHTTPServer: NSObject {
               private var listener: NWListener?
               private let root: String
               private var ready = false
-              private let console: ConsoleManager
 
-              init(rootPath: String, console: ConsoleManager) {
+              init(rootPath: String) {
                   self.root = rootPath
-                  self.console = console
               }
 
               func start() -> Bool {
@@ -187,11 +201,11 @@ jobs:
                           switch state {
                           case .ready:
                               self?.ready = true
-                              self?.console.log("[SERVER] ✅ Ready on port 8765")
+                              print("[SERVER] Ready on port 8765")
                           case .failed(let err):
-                              self?.console.log("[SERVER] ❌ Failed: \(err)")
+                              print("[SERVER] Failed: \(err)")
                           case .cancelled:
-                              self?.console.log("[SERVER] ⛔ Cancelled")
+                              print("[SERVER] Cancelled")
                           default: break
                           }
                       }
@@ -208,7 +222,7 @@ jobs:
                       }
                       return ready
                   } catch {
-                      console.log("[SERVER] ❌ Start error: \(error)")
+                      print("[SERVER] Start error: \(error)")
                       return false
                   }
               }
@@ -223,7 +237,7 @@ jobs:
                       guard let self = self else { connection.cancel(); return }
 
                       if let error = error {
-                          self.console.log("[SERVER] ⚠️ Recv error: \(error)")
+                          print("[SERVER] Recv error: \(error)")
                           connection.cancel()
                           return
                       }
@@ -271,21 +285,21 @@ jobs:
                   let stdRoot = (root as NSString).standardizingPath
 
                   guard stdPath.hasPrefix(stdRoot) else {
-                      console.log("[SERVER] 🚫 403 Forbidden: \(path)")
                       sendHTTP(connection: connection, status: 403, body: Data())
                       return
                   }
 
                   guard FileManager.default.fileExists(atPath: stdPath),
                         let data = FileManager.default.contents(atPath: stdPath) else {
-                      console.log("[SERVER] ❌ 404 Not Found: \(path)")
+                      print("[SERVER] 404: \(path)")
                       sendHTTP(connection: connection, status: 404, body: Data())
                       return
                   }
 
                   let ext = (stdPath as NSString).pathExtension.lowercased()
                   let mime = mimeFor(ext: ext)
-                  console.log("[SERVER] ✅ 200 OK: \(path) (\(data.count) bytes)")
+
+                  print("[SERVER] 200 \(path) (\(data.count) bytes, \(mime))")
 
                   var header = "HTTP/1.1 200 OK\r\n"
                   header += "Content-Type: " + mime + "\r\n"
@@ -336,10 +350,14 @@ jobs:
                   case "ttf": return "font/ttf"
                   case "otf": return "font/otf"
                   case "data", "bin", "pck": return "application/octet-stream"
+                  case "zip": return "application/zip"
+                  case "xml": return "application/xml"
+                  case "txt": return "text/plain"
                   default: return "application/octet-stream"
                   }
               }
 
+              // Auto-detect the HTML entry point
               private var entryHTML: String {
                   let candidates = ["godot.editor.html", "godot.web.editor.html", "godot.html", "index.html"]
                   for candidate in candidates {
@@ -352,46 +370,40 @@ jobs:
               }
           }
 
-          // MARK: - JS Bridge
           final class JSBridge: NSObject, WKScriptMessageHandler {
-              private let console: ConsoleManager
-              init(console: ConsoleManager) {
-                  self.console = console
-              }
-
               func userContentController(_ ucc: WKUserContentController, didReceive msg: WKScriptMessage) {
                   if let body = msg.body as? String {
-                      console.log("[GODOT JS] \(body)")
+                      print("[GODOT] \(body)")
                   }
               }
           }
 
-          // MARK: - Navigation Delegate
           final class NavDebug: NSObject, WKNavigationDelegate {
-              private let console: ConsoleManager
-              init(console: ConsoleManager) {
-                  self.console = console
-              }
-
               func webView(_ wv: WKWebView, didFinish nav: WKNavigation!) {
-                  console.log("[WEBVIEW] ✅ didFinish loading")
+                  print("[WEBVIEW] didFinish")
               }
-
               func webView(_ wv: WKWebView, didFail nav: WKNavigation!, withError err: Error) {
-                  console.log("[WEBVIEW] ❌ didFail: \(err.localizedDescription)")
+                  print("[WEBVIEW] didFail: \(err)")
               }
-
               func webView(_ wv: WKWebView, didFailProvisionalNavigation nav: WKNavigation!, withError err: Error) {
-                  console.log("[WEBVIEW] ❌ provisionalFail: \(err.localizedDescription)")
+                  print("[WEBVIEW] provisionalFail: \(err)")
               }
           }
 
-          // MARK: - UIViewRepresentable for WebView
-          struct EditorView: UIViewRepresentable {
-              @ObservedObject var console: ConsoleManager
+          @main
+          struct GodotWebEditorApp: App {
+              var body: some Scene {
+                  WindowGroup {
+                      EditorView()
+                          .edgesIgnoringSafeArea(.all)
+                  }
+              }
+          }
 
+          struct EditorView: UIViewRepresentable {
               func makeUIView(context: Context) -> WKWebView {
                   let cfg = WKWebViewConfiguration()
+
                   cfg.preferences.javaScriptEnabled = true
                   cfg.preferences.javaScriptCanOpenWindowsAutomatically = true
                   cfg.allowsInlineMediaPlayback = true
@@ -406,7 +418,7 @@ jobs:
 
                   cfg.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
 
-                  let bridge = JSBridge(console: console)
+                  let bridge = JSBridge()
                   cfg.userContentController.add(bridge, name: "iosLog")
 
                   let fixScript = """
@@ -468,23 +480,23 @@ jobs:
                       wv.isInspectable = true
                   }
 
-                  let nav = NavDebug(console: console)
+                  let nav = NavDebug()
                   wv.navigationDelegate = nav
                   context.coordinator.nav = nav
 
                   let godotPath = Bundle.main.bundlePath + "/godot_editor"
-                  let server = LocalHTTPServer(rootPath: godotPath, console: console)
+                  let server = LocalHTTPServer(rootPath: godotPath)
 
                   if server.start() {
                       context.coordinator.server = server
-                      console.log("[APP] 🚀 Server started, loading editor...")
+                      print("[APP] Server started, loading editor...")
                       usleep(300000)
 
                       if let url = URL(string: "http://127.0.0.1:8765/") {
                           wv.load(URLRequest(url: url))
                       }
                   } else {
-                      console.log("[APP] ❌ Server failed!")
+                      print("[APP] Server failed!")
                       wv.loadHTMLString("<html><body style=\"background:#000;color:#f00;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;\"><div style=\"text-align:center\"><h1>Server Error</h1><p>Could not start HTTP server</p></div></body></html>", baseURL: nil)
                   }
 
@@ -500,104 +512,6 @@ jobs:
               class Coordinator: NSObject {
                   var server: LocalHTTPServer?
                   var nav: NavDebug?
-              }
-          }
-
-          // MARK: - Console View (Overlay)
-          struct ConsoleView: View {
-              @ObservedObject var console: ConsoleManager
-
-              var body: some View {
-                  VStack(spacing: 0) {
-                      // Header
-                      HStack {
-                          Text("📋 Debug Console")
-                              .font(.headline)
-                              .foregroundColor(.white)
-                          Spacer()
-                          Button(action: { console.clear() }) {
-                              Image(systemName: "trash")
-                                  .foregroundColor(.red)
-                          }
-                          Button(action: { console.toggle() }) {
-                              Image(systemName: "xmark.circle.fill")
-                                  .foregroundColor(.gray)
-                          }
-                      }
-                      .padding(8)
-                      .background(Color.black.opacity(0.8))
-
-                      // Log List
-                      ScrollViewReader { proxy in
-                          ScrollView {
-                              LazyVStack(alignment: .leading, spacing: 2) {
-                                  ForEach(console.logs.indices, id: \.self) { i in
-                                      Text(console.logs[i])
-                                          .font(.system(size: 11, weight: .regular, design: .monospaced))
-                                          .foregroundColor(.green)
-                                          .padding(.horizontal, 8)
-                                          .padding(.vertical, 1)
-                                          .frame(maxWidth: .infinity, alignment: .leading)
-                                          .background(Color.black.opacity(0.5))
-                                          .id(i)
-                                  }
-                              }
-                          }
-                          .onChange(of: console.logs.count) { _ in
-                              withAnimation {
-                                  proxy.scrollTo(console.logs.count - 1, anchor: .bottom)
-                              }
-                          }
-                      }
-                      .background(Color.black.opacity(0.9))
-                  }
-                  .frame(maxHeight: UIScreen.main.bounds.height * 0.5)
-                  .cornerRadius(12)
-                  .shadow(radius: 10)
-                  .padding()
-                  .transition(.move(edge: .bottom))
-              }
-          }
-
-          // MARK: - Main App Entry
-          @main
-          struct GodotWebEditorApp: App {
-              @StateObject private var console = ConsoleManager()
-
-              var body: some Scene {
-                  WindowGroup {
-                      ZStack {
-                          EditorView(console: console)
-                              .edgesIgnoringSafeArea(.all)
-
-                          // Console Toggle Button (Top Right)
-                          VStack {
-                              HStack {
-                                  Spacer()
-                                  Button(action: { console.toggle() }) {
-                                      Image(systemName: console.isVisible ? "terminal.fill" : "terminal")
-                                          .font(.title2)
-                                          .padding(12)
-                                          .background(Color.black.opacity(0.7))
-                                          .foregroundColor(.white)
-                                          .clipShape(Circle())
-                                          .shadow(radius: 5)
-                                  }
-                                  .padding(.trailing, 16)
-                                  .padding(.top, 40)
-                              }
-                              Spacer()
-                          }
-
-                          // Console Overlay
-                          if console.isVisible {
-                              VStack {
-                                  Spacer()
-                                  ConsoleView(console: console)
-                              }
-                          }
-                      }
-                  }
               }
           }
           SWIFTEOF
@@ -686,7 +600,7 @@ jobs:
           </document>
           LAUNCHEOF
 
-          # App Icon placeholder
+          # App Icon (placeholder, unchanged)
           echo '{"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/Contents.json
           echo '{"images":[{"filename":"appicon.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}' > GodotWebEditor/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json
 
@@ -705,6 +619,7 @@ jobs:
           print("✅ Icon created")
           PYEOF
 
+          # project.yml (unchanged)
           cat > GodotWebEditor/project.yml << 'YAMLEOF'
           name: GodotWebEditor
           settings:
@@ -760,7 +675,7 @@ jobs:
 
           cd ..
 
-      - name: 🔍 Verify .app Bundle
+      - name: 🔍 Verify .app Bundle (skip .data check)
         run: |
           set -ex
 
@@ -773,12 +688,26 @@ jobs:
           fi
 
           echo "✅ Found app: $APP_PATH"
+          echo ""
+          echo "📂 .app contents:"
+          ls -la "$APP_PATH/"
+
+          # Ensure godot_editor exists
           if [ ! -d "$APP_PATH/godot_editor" ]; then
+            echo "⚠️ godot_editor missing! Copying manually..."
             mkdir -p "$APP_PATH/godot_editor"
             rsync -av --exclude='godot.editor.data' GodotWebEditor/Resources/godot_editor/ "$APP_PATH/godot_editor/"
           fi
 
-          echo "✅ Verification complete (console integrated)."
+          echo ""
+          echo "📂 godot_editor in .app:"
+          ls -la "$APP_PATH/godot_editor/"
+          echo ""
+          echo "📊 godot_editor size: $(du -sh "$APP_PATH/godot_editor" | cut -f1)"
+          echo "📊 Total .app size: $(du -sh "$APP_PATH" | cut -f1)"
+
+          # We intentionally do NOT check for godot.editor.data
+          echo "✅ Verification complete (godot.editor.data not required)."
 
       - name: 📦 Package IPA
         run: |
@@ -791,7 +720,7 @@ jobs:
           rm -rf Payload/GodotWebEditor.app/_CodeSignature 2>/dev/null || true
 
           VERSION="${{ github.event.inputs.godot_version || '4.3' }}"
-          IPA_NAME="GodotWebEditor_v${VERSION}_with_console.ipa"
+          IPA_NAME="GodotWebEditor_v${VERSION}_no_data.ipa"
 
           zip -qr "$IPA_NAME" Payload
           rm -rf Payload
@@ -802,18 +731,18 @@ jobs:
       - name: ⬆️ Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: godot-web-editor-ipa-with-console
-          path: GodotWebEditor_v*_with_console.ipa
+          name: godot-web-editor-ipa-no-data
+          path: GodotWebEditor_v*_no_data.ipa
           retention-days: 30
 
       - name: ✅ Done
         run: |
           echo ""
           echo "╔══════════════════════════════════════════════════════╗"
-          echo "║  🎉 IPA READY (with on-screen console)             ║"
+          echo "║  🎉 IPA BUILD COMPLETE (without .data file)        ║"
           echo "╠══════════════════════════════════════════════════════╣"
           echo "║  📁 File: ${{ env.IPA_NAME }}                      ║"
-          echo "║  📱 Install & open the app.                        ║"
-          echo "║  🔍 Tap the Terminal icon (top-right) to debug.    ║"
-          echo "║  ⚠️  .data file excluded – watch logs for 404s.    ║"
+          echo "║  ⚠️  Note: godot.editor.data is EXCLUDED.          ║"
+          echo "║  📱 Editor will likely show a black screen.        ║"
+          echo "║  🔧 Use only if you have a custom .data loader.    ║"
           echo "╚══════════════════════════════════════════════════════╝"
