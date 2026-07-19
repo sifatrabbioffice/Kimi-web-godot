@@ -88,10 +88,32 @@ jobs:
             rmdir "$SUBDIR" 2>/dev/null || true
           fi
 
+          echo ""
+          echo "📂 Files after extract:"
+          ls -lah
+          echo ""
+
+          # ═══════════════════════════════════════════════════════
+          # RENAME: godot.web.editor.wasm → godot.web.editor.wasm32.wasm
+          # ═══════════════════════════════════════════════════════
+          if [ -f "godot.web.editor.wasm" ]; then
+            echo "🔄 Renaming godot.web.editor.wasm → godot.web.editor.wasm32.wasm"
+            mv godot.web.editor.wasm godot.web.editor.wasm32.wasm
+            echo "✅ Renamed successfully"
+          else
+            echo "⚠️ godot.web.editor.wasm not found, skipping rename"
+          fi
+
+          # Also check for godot.editor.wasm variant
+          if [ -f "godot.editor.wasm" ]; then
+            echo "🔄 Renaming godot.editor.wasm → godot.editor.wasm32.wasm"
+            mv godot.editor.wasm godot.editor.wasm32.wasm
+            echo "✅ Renamed successfully"
+          fi
 
           echo ""
-          echo "📂 Downloaded files:"
-          ls -lah
+          echo "📂 Final files after rename:"
+          ls -lah *.wasm 2>/dev/null || echo "  (no .wasm files)"
           echo ""
 
           # Check HTML entry point
@@ -111,7 +133,6 @@ jobs:
 
           # Required files
           REQUIRED_FILES=(
-            "godot.editor.wasm"
             "godot.editor.js"
           )
 
@@ -126,22 +147,20 @@ jobs:
             fi
           done
 
+          # Check for any wasm file
+          if ls *.wasm 1>/dev/null 2>&1; then
+            echo "  ✅ WASM file(s) found:"
+            ls -lh *.wasm
+          else
+            echo "  ❌ MISSING: No .wasm file found!"
+            MISSING=$((MISSING + 1))
+          fi
+
           if [ $MISSING -gt 0 ]; then
             echo ""
             echo "❌ CRITICAL: $MISSING essential file(s) missing!"
             exit 1
           fi
-
-                    # ═══════════════════════════════════════════════════════
-          # RENAME: godot.web.editor.wasm → godot.web.editor.wasm32.wasm
-          # ═══════════════════════════════════════════════════════
-          if [ -f "godot.web.editor.wasm" ]; then
-            mv godot.web.editor.wasm godot.web.editor.wasm32.wasm
-            echo "✅ Renamed: godot.web.editor.wasm → godot.web.editor.wasm32.wasm"
-          else
-            echo "ℹ️ godot.web.editor.wasm not found, skipping rename"
-          fi
-
 
           echo ""
           echo "✅ All critical files present."
