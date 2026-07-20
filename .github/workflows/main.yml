@@ -1,72 +1,366 @@
-name: Build Godot Web Editor IPA
+name: Build Unsigned IPA
 
 on:
   push:
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Build Godot Web Editor iOS App
+  build-ipa:
     runs-on: macos-latest
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Prepare App Directory Structure
-        run: |
-          echo "Creating iOS App Payload structure..."
-          mkdir -p Payload/WebEngineApp.app/www
-          
-          # Root theke sob file Payload/WebEngineApp.app/www/ er bhitore copy hobe
-          # Apni jekono folder structure e file rakhle oita automatic khuje nibe
-          find . -maxdepth 2 -not -path '*/.*' -type f \( -name "*.html" -o -name "*.js" -o -name "*.wasm" -o -name "*.png" -o -name "*.json" -o -name "*.svg" -o -name "*.woff2" \) -exec cp {} Payload/WebEngineApp.app/www/ \;
-          
-          echo "Files copied to Payload/WebEngineApp.app/www/"
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
 
-      - name: Create iOS Info.plist and Config
+      - name: Download & Extract Godot Web Editor
         run: |
-          APP_DIR="Payload/WebEngineApp.app"
-          
-          # Info.plist e godot.editor.html ke main entry hisebe set kora
-          cat << 'EOF' > "$APP_DIR/Info.plist"
+          echo "Downloading Godot Web Editor from GitHub..."
+          mkdir -p download_tmp
+          curl -L -o download_tmp/godot-web-editor.zip             "https://codeload.github.com/thegatesbrowser/godot-web-editor/zip/refs/heads/main"
+
+          echo "Unzipping..."
+          unzip -q download_tmp/godot-web-editor.zip -d download_tmp/
+
+          echo "Extracted contents:"
+          find download_tmp -maxdepth 2 -type f | head -30
+
+          # Create www folder
+          mkdir -p www
+
+          # The zip extracts to: godot-web-editor-main/
+          # Find the actual web editor files inside
+          EXTRACTED_DIR="download_tmp/godot-web-editor-main"
+
+          if [ -d "$EXTRACTED_DIR" ]; then
+            echo "Found extracted directory: $EXTRACTED_DIR"
+
+            # Check if web files are directly inside or in a subfolder
+            if [ -f "$EXTRACTED_DIR/godot.editor.html" ]; then
+              echo "Web files found directly in root of extracted folder"
+              cp -R "$EXTRACTED_DIR"/* www/
+            else
+              # Try to find godot.editor.html in subdirectories
+              HTML_FILE=$(find "$EXTRACTED_DIR" -name "godot.editor.html" -type f | head -1)
+              if [ -n "$HTML_FILE" ]; then
+                WEB_DIR=$(dirname "$HTML_FILE")
+                echo "Found web files in: $WEB_DIR"
+                cp -R "$WEB_DIR"/* www/
+              else
+                echo "WARNING: godot.editor.html not found, copying everything..."
+                cp -R "$EXTRACTED_DIR"/* www/
+              fi
+            fi
+          else
+            echo "ERROR: Expected directory not found after extraction"
+            ls -la download_tmp/
+            exit 1
+          fi
+
+          echo "=== www folder contents ==="
+          ls -la www/
+
+          # Verify godot.editor.html exists
+          if [ ! -f "www/godot.editor.html" ]; then
+            echo "ERROR: godot.editor.html not found in www folder!"
+            echo "Available files:"
+            find www -type f | head -20
+            exit 1
+          fi
+
+          echo "SUCCESS: Godot Web Editor files ready in www/"
+
+          # Cleanup
+          rm -rf download_tmp
+
+      - name: Create iOS App Source Files
+        run: |
+          mkdir -p WebEngineApp
+
+          # ===== main.swift =====
+          cat > WebEngineApp/main.swift << 'SWIFTEOF'
+          import UIKit
+
+          @main
+          class AppDelegate: UIResponder, UIApplicationDelegate {
+              var window: UIWindow?
+
+              func application(_ application: UIApplication,
+                               didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+                  window = UIWindow(frame: UIScreen.main.bounds)
+                  let viewController = WebViewController()
+                  let navController = UINavigationController(rootViewController: viewController)
+                  window?.rootViewController = navController
+                  window?.makeKeyAndVisible()
+                  return true
+              }
+          }
+          SWIFTEOF
+
+          # ===== WebViewController.swift =====
+          cat > WebEngineApp/WebViewController.swift << 'SWIFTEOF'
+          import UIKit
+          import WebKit
+
+          class WebViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
+              var webView: WKWebView!
+              var progressView: UIProgressView!
+
+              override func viewDidLoad() {
+                  super.viewDidLoad()
+                  title = "Godot Web Editor"
+
+                  let config = WKWebViewConfiguration()
+                  config.preferences.javaScriptEnabled = true
+                  config.preferences.javaScriptCanOpenWindowsAutomatically = true
+                  config.allowsInlineMediaPlayback = true
+                  config.mediaTypesRequiringUserActionForPlayback = []
+
+                  if #available(iOS 14.0, *) {
+                      let prefs = WKWebpagePreferences()
+                      prefs.allowsContentJavaScript = true
+                      config.defaultWebpagePreferences = prefs
+                  }
+
+                  config.setValue(true, forKey: "allowUniversalAccessFromFileURLs")
+                  config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+
+                  webView = WKWebView(frame: view.bounds, configuration: config)
+                  webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                  webView.navigationDelegate = self
+                  webView.uiDelegate = self
+                  webView.allowsBackForwardNavigationGestures = true
+
+                  progressView = UIProgressView(progressViewStyle: .default)
+                  progressView.translatesAutoresizingMaskIntoConstraints = false
+                  progressView.progressTintColor = .systemBlue
+                  view.addSubview(webView)
+                  view.addSubview(progressView)
+
+                  NSLayoutConstraint.activate([
+                      progressView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+                      progressView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                      progressView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                      progressView.heightAnchor.constraint(equalToConstant: 2)
+                  ])
+
+                  webView.addObserver(self, forKeyPath: #keyPath(WKWebView.estimatedProgress), options: .new, context: nil)
+                  loadLocalHTML()
+              }
+
+              func loadLocalHTML() {
+                  let wwwPath = Bundle.main.bundleURL.appendingPathComponent("www")
+                  let htmlPath = wwwPath.appendingPathComponent("godot.editor.html")
+
+                  if FileManager.default.fileExists(atPath: htmlPath.path) {
+                      webView.loadFileURL(htmlPath, allowingReadAccessTo: wwwPath)
+                  } else {
+                      showError("godot.editor.html not found in www folder!\n\nPlease extract Godot Web Editor files into the www folder.")
+                  }
+              }
+
+              func showError(_ message: String) {
+                  let alert = UIAlertController(title: "Error", message: message, preferredStyle: .alert)
+                  alert.addAction(UIAlertAction(title: "OK", style: .default))
+                  present(alert, animated: true)
+              }
+
+              override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
+                  if keyPath == "estimatedProgress" {
+                      progressView.progress = Float(webView.estimatedProgress)
+                      progressView.isHidden = webView.estimatedProgress >= 1.0
+                  }
+              }
+
+              deinit {
+                  webView.removeObserver(self, forKeyPath: #keyPath(WKWebView.estimatedProgress))
+              }
+
+              func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+                  progressView.isHidden = true
+              }
+
+              func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+                  progressView.isHidden = true
+                  showError(error.localizedDescription)
+              }
+
+              func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+                  progressView.isHidden = true
+                  showError("Failed to load: \(error.localizedDescription)")
+              }
+
+              func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+                  let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+                  alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler() })
+                  present(alert, animated: true)
+              }
+
+              func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+                  let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+                  alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(false) })
+                  alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler(true) })
+                  present(alert, animated: true)
+              }
+
+              func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
+                  let alert = UIAlertController(title: nil, message: prompt, preferredStyle: .alert)
+                  alert.addTextField { textField in
+                      textField.text = defaultText
+                  }
+                  alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(nil) })
+                  alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler(alert.textFields?.first?.text) })
+                  present(alert, animated: true)
+              }
+          }
+          SWIFTEOF
+
+      - name: Create Info.plist
+        run: |
+          cat > WebEngineApp/Info.plist << 'PLISTEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-              <key>CFBundleIdentifier</key>
-              <string>org.godotengine.webeditor</string>
-              <key>CFBundleName</key>
-              <string>GodotEditor</string>
-              <key>CFBundleDisplayName</key>
-              <string>Godot Editor</string>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
               <key>CFBundleExecutable</key>
               <string>WebEngineApp</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.yourcompany.webengineapp</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>Godot Web Editor</string>
+              <key>CFBundleDisplayName</key>
+              <string>Godot Web Editor</string>
               <key>CFBundlePackageType</key>
               <string>APPL</string>
               <key>CFBundleShortVersionString</key>
               <string>1.0</string>
-              <key>MinimumOSVersion</key>
-              <string>14.0</string>
-              <key>MainEntryFile</key>
-              <string>godot.editor.html</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>LSRequiresIPhoneOS</key>
+              <true/>
+              <key>UILaunchStoryboardName</key>
+              <string>LaunchScreen</string>
+              <key>UIRequiredDeviceCapabilities</key>
+              <array>
+                  <string>armv7</string>
+              </array>
+              <key>UISupportedInterfaceOrientations</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+                  <string>UIInterfaceOrientationPortraitUpsideDown</string>
+              </array>
+              <key>UISupportedInterfaceOrientations~ipad</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationPortraitUpsideDown</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+              <key>UIViewControllerBasedStatusBarAppearance</key>
+              <false/>
+              <key>WKWebViewConfiguration</key>
+              <dict>
+                  <key>allowsInlineMediaPlayback</key>
+                  <true/>
+              </dict>
+              <key>NSAppTransportSecurity</key>
+              <dict>
+                  <key>NSAllowsArbitraryLoads</key>
+                  <true/>
+                  <key>NSAllowsLocalNetworking</key>
+                  <true/>
+              </dict>
           </dict>
           </plist>
-          EOF
+          PLISTEOF
 
-          # Binary file create kora
-          cat << 'EOF' > "$APP_DIR/WebEngineApp"
-          #!/bin/bash
-          echo "Godot Web Editor Initialized with godot.editor.html"
-          EOF
-          chmod +x "$APP_DIR/WebEngineApp"
-
-      - name: Package to Unsigned IPA
+      - name: Create LaunchScreen.storyboard
         run: |
-          zip -r Godot-Web-Editor.ipa Payload
+          cat > WebEngineApp/LaunchScreen.storyboard << 'XMLEOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="21507" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="01J-lp-oVM">
+              <device id="retina6_12" orientation="portrait" appearance="light"/>
+              <dependencies>
+                  <deployment identifier="iOS"/>
+                  <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="21505"/>
+              </dependencies>
+              <scenes>
+                  <scene sceneID="EHf-IW-A2E">
+                      <objects>
+                          <viewController id="01J-lp-oVM" sceneMemberID="viewController">
+                              <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">
+                                  <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
+                                  <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                                  <subviews>
+                                      <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Godot Web Editor" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" translatesAutoresizingMaskIntoConstraints="NO" id="lbl">
+                                          <rect key="frame" x="0.0" y="400" width="393" height="30"/>
+                                          <fontDescription key="fontDescription" type="boldSystem" pointSize="24"/>
+                                          <color key="textColor" white="1" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
+                                          <nil key="highlightedColor"/>
+                                      </label>
+                                  </subviews>
+                                  <color key="backgroundColor" red="0.078" green="0.078" blue="0.078" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                                  <constraints>
+                                      <constraint firstItem="lbl" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="c1"/>
+                                      <constraint firstItem="lbl" firstAttribute="centerY" secondItem="Ze5-6b-2t3" secondAttribute="centerY" id="c2"/>
+                                  </constraints>
+                              </view>
+                          </viewController>
+                          <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" userLabel="First Responder" sceneMemberID="firstResponder"/>
+                      </objects>
+                  </scene>
+              </scenes>
+          </document>
+          XMLEOF
+
+      - name: Build Unsigned IPA
+        run: |
+          mkdir -p Payload/WebEngineApp.app
+
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          TARGET="arm64-apple-ios15.0"
+
+          xcrun -sdk iphoneos swiftc             -target $TARGET             -sdk $SDK_PATH             -framework UIKit             -framework WebKit             -o Payload/WebEngineApp.app/WebEngineApp             WebEngineApp/main.swift             WebEngineApp/WebViewController.swift
+
+          if [ ! -f "Payload/WebEngineApp.app/WebEngineApp" ]; then
+            echo "ERROR: Binary not created!"
+            exit 1
+          fi
+
+          cp WebEngineApp/Info.plist Payload/WebEngineApp.app/
+          cp WebEngineApp/LaunchScreen.storyboard Payload/WebEngineApp.app/
+          cp -R www Payload/WebEngineApp.app/
+
+          echo -n "APPL????" > Payload/WebEngineApp.app/PkgInfo
+
+          zip -r WebEngineApp_unsigned.ipa Payload
+
+          ls -lh WebEngineApp_unsigned.ipa
+          echo "=== App Bundle Contents ==="
+          find Payload/WebEngineApp.app -type f | head -40
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Godot-Web-Editor-IPA
-          path: Godot-Web-Editor.ipa
+          name: WebEngineApp-unsigned-ipa
+          path: WebEngineApp_unsigned.ipa
+          retention-days: 30
+
+      - name: Upload IPA to Release (if tagged)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: WebEngineApp_unsigned.ipa
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
