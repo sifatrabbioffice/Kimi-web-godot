@@ -18,20 +18,17 @@ jobs:
           echo "Creating iOS App Payload structure..."
           mkdir -p Payload/WebEngineApp.app/www
           
-          # রুট ফোল্ডারের www ফোল্ডার থেকে ফাইলগুলো কপি করা
-          if [ -d "www" ]; then
-            cp -r www/* Payload/WebEngineApp.app/www/
-            echo "Copied all Godot files successfully."
-          else
-            echo "Error: 'www' folder not found! Please create a 'www' folder and paste your files inside it."
-            exit 1
-          fi
+          # Root theke sob file Payload/WebEngineApp.app/www/ er bhitore copy hobe
+          # Apni jekono folder structure e file rakhle oita automatic khuje nibe
+          find . -maxdepth 2 -not -path '*/.*' -type f \( -name "*.html" -o -name "*.js" -o -name "*.wasm" -o -name "*.png" -o -name "*.json" -o -name "*.svg" -o -name "*.woff2" \) -exec cp {} Payload/WebEngineApp.app/www/ \;
+          
+          echo "Files copied to Payload/WebEngineApp.app/www/"
 
-      - name: Create iOS Info.plist and Native Binary Stub
+      - name: Create iOS Info.plist and Config
         run: |
           APP_DIR="Payload/WebEngineApp.app"
           
-          # Info.plist ফাইল তৈরি (যেখানে মূল এন্ট্রি ফাইল হিসেবে godot.editor.html সেট করা হয়েছে)
+          # Info.plist e godot.editor.html ke main entry hisebe set kora
           cat << 'EOF' > "$APP_DIR/Info.plist"
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -51,21 +48,16 @@ jobs:
               <string>1.0</string>
               <key>MinimumOSVersion</key>
               <string>14.0</string>
-              <key>UILaunchStoryboardName</key>
-              <string>LaunchScreen</string>
-              <key>UIRequiredDeviceCapabilities</key>
-              <array>
-                  <string>armv7</string>
-                  <string>webgl2</string>
-              </array>
+              <key>MainEntryFile</key>
+              <string>godot.editor.html</string>
           </dict>
           </plist>
           EOF
 
-          # অ্যাপ রান করার জন্য এক্সিকিউটেবল ফাইল তৈরি
+          # Binary file create kora
           cat << 'EOF' > "$APP_DIR/WebEngineApp"
           #!/bin/bash
-          echo "Godot Web Editor Container Started"
+          echo "Godot Web Editor Initialized with godot.editor.html"
           EOF
           chmod +x "$APP_DIR/WebEngineApp"
 
