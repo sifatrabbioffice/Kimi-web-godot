@@ -34,17 +34,13 @@ jobs:
           # Create www folder
           mkdir -p www
 
-          # The official zip typically contains a folder like "Godot_v4.7.1-stable_web_editor"
-          # We need to copy everything from that folder into www
-          EXTRACTED_DIR=$(find download_tmp -maxdepth 1 -mindepth 1 -type d -not -name '__MACOSX' | head -1)
-          if [ -d "$EXTRACTED_DIR" ]; then
-            echo "Found extracted directory: $EXTRACTED_DIR"
-            cp -R "$EXTRACTED_DIR"/* www/
-          else
-            echo "ERROR: No directory found after extraction"
-            ls -la download_tmp/
-            exit 1
-          fi
+          # The zip extracts files directly into download_tmp/ (no subfolder)
+          echo "Copying web editor files to www..."
+          for file in download_tmp/*; do
+            if [ "$file" != "download_tmp/godot-web-editor.zip" ]; then
+              cp -R "$file" www/
+            fi
+          done
 
           echo "=== www folder contents ==="
           ls -la www/
