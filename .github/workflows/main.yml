@@ -62,8 +62,8 @@ jobs:
         run: |
           mkdir -p WebEngineApp
 
-          # ===== main.swift =====
-          cat > WebEngineApp/main.swift << 'SWIFTEOF'
+          # ===== AppDelegate.swift (renamed from main.swift) =====
+          cat > WebEngineApp/AppDelegate.swift << 'SWIFTEOF'
           import UIKit
 
           @main
@@ -311,7 +311,8 @@ jobs:
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           TARGET="arm64-apple-ios15.0"
 
-          xcrun -sdk iphoneos swiftc             -target $TARGET             -sdk $SDK_PATH             -framework UIKit             -framework WebKit             -o Payload/WebEngineApp.app/WebEngineApp             WebEngineApp/main.swift             WebEngineApp/WebViewController.swift
+          # Note: AppDelegate.swift and WebViewController.swift are compiled together
+          xcrun -sdk iphoneos swiftc             -target $TARGET             -sdk $SDK_PATH             -framework UIKit             -framework WebKit             -o Payload/WebEngineApp.app/WebEngineApp             WebEngineApp/AppDelegate.swift             WebEngineApp/WebViewController.swift
 
           if [ ! -f "Payload/WebEngineApp.app/WebEngineApp" ]; then
             echo "ERROR: Binary not created!"
