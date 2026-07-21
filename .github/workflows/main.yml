@@ -20,9 +20,10 @@ jobs:
 
       - name: Download & Extract Godot Web Editor
         run: |
-          echo "Downloading Godot Web Editor from GitHub..."
+          echo "Downloading Godot Web Editor from official release..."
           mkdir -p download_tmp
-          curl -L -o download_tmp/godot-web-editor.zip             "https://codeload.github.com/thegatesbrowser/godot-web-editor/zip/refs/heads/main"
+          curl -L -o download_tmp/godot-web-editor.zip \
+            "https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_web_editor.zip"
 
           echo "Unzipping..."
           unzip -q download_tmp/godot-web-editor.zip -d download_tmp/
@@ -33,31 +34,14 @@ jobs:
           # Create www folder
           mkdir -p www
 
-          # The zip extracts to: godot-web-editor-main/
-          # Find the actual web editor files inside
-          EXTRACTED_DIR="download_tmp/godot-web-editor-main"
-
+          # The official zip typically contains a folder like "Godot_v4.7.1-stable_web_editor"
+          # We need to copy everything from that folder into www
+          EXTRACTED_DIR=$(find download_tmp -maxdepth 1 -mindepth 1 -type d -not -name '__MACOSX' | head -1)
           if [ -d "$EXTRACTED_DIR" ]; then
             echo "Found extracted directory: $EXTRACTED_DIR"
-
-            # Check if web files are directly inside or in a subfolder
-            if [ -f "$EXTRACTED_DIR/godot.editor.html" ]; then
-              echo "Web files found directly in root of extracted folder"
-              cp -R "$EXTRACTED_DIR"/* www/
-            else
-              # Try to find godot.editor.html in subdirectories
-              HTML_FILE=$(find "$EXTRACTED_DIR" -name "godot.editor.html" -type f | head -1)
-              if [ -n "$HTML_FILE" ]; then
-                WEB_DIR=$(dirname "$HTML_FILE")
-                echo "Found web files in: $WEB_DIR"
-                cp -R "$WEB_DIR"/* www/
-              else
-                echo "WARNING: godot.editor.html not found, copying everything..."
-                cp -R "$EXTRACTED_DIR"/* www/
-              fi
-            fi
+            cp -R "$EXTRACTED_DIR"/* www/
           else
-            echo "ERROR: Expected directory not found after extraction"
+            echo "ERROR: No directory found after extraction"
             ls -la download_tmp/
             exit 1
           fi
@@ -65,7 +49,7 @@ jobs:
           echo "=== www folder contents ==="
           ls -la www/
 
-          # Verify godot.editor.html exists
+          # Verify the essential file exists
           if [ ! -f "www/godot.editor.html" ]; then
             echo "ERROR: godot.editor.html not found in www folder!"
             echo "Available files:"
